@@ -8,3 +8,4 @@ data/charts/
 data/milvus*.db*
 data/.jwt_secret
 data/*.db
+data/*.db-*

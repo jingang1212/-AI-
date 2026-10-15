@@ -32,7 +32,10 @@ def add_chunks(chunks: list[dict]) -> None:
 
 
 def search(query: str, top_k: int = config.DEFAULT_TOP_K) -> list[dict]:
-    """向量检索，返回带分数和出处的命中。"""
+    """
+    向量检索，返回带分数和出处的命中。
+    注意：collection 用 cosine 度量，score 是余弦相似度（0~1，越大越相似）。
+    """
     results = get_store().similarity_search_with_score(query, k=top_k)
     return [
         {

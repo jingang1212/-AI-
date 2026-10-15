@@ -20,3 +20,6 @@ dependencies = [
     "uvicorn[standard]>=0.29",
     "sse-starlette>=2.0",
 ]
+
+[tool.uv]
+package = false

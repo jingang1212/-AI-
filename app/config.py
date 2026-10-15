@@ -23,3 +23,8 @@ BASE_URL = os.getenv("BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 100
 DEFAULT_TOP_K = 5
+
+if not DASHSCOPE_API_KEY:
+    raise RuntimeError(
+        "未检测到 DASHSCOPE_API_KEY。请复制 .env.example 为 .env 并填入你的 key。"
+    )

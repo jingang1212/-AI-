@@ -29,7 +29,9 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command
 
 from .. import tools as tool_registry
 from .staff import build_staff_tools
@@ -113,6 +115,7 @@ async def arun(
     thread_id: str,
     role: str,
     queue: asyncio.Queue | None = None,
+    decide: Any = None,
 ) -> dict[str, Any]:
     """跑一次完整对话，返回 {answer, events, rounds}。
 
@@ -121,7 +124,9 @@ async def arun(
     - thread_id：会话/线程 ID。LangGraph 用它对号入座地存取 checkpoint，
       同一个 thread_id 的多轮对话会自动带上历史（记忆就是这么实现的）；
     - role：用户角色（ops/leader/service），决定提示词与工具白名单；
-    - queue：可选。传入后事件会实时写进队列，由 SSE/WS 端点推给前端。
+    - queue：可选。传入后事件会实时写进队列，由 SSE/WS 端点推给前端；
+    - decide：可选。`async def decide(payload) -> dict`，在写操作工具触发 interrupt 时
+      负责「把确认请求转给前端并等用户决定」。不传则任何 interrupt 都自动拒绝。
     """
     graph = get_graph()
     events = start_trace(queue)  # 开启轨迹收集，工具内部会用 trace_event 往里写
@@ -130,17 +135,47 @@ async def arun(
     # 传错名字（例如写成 session_id）不会报错，但记忆会「静默失效」，
     # 表现为每次对话模型都忘记上文——这是新手最常见的坑。
     config = {"configurable": {"thread_id": thread_id}}
-    try:
-        state = await graph.ainvoke(
-            {"messages": [HumanMessage(question)], "role": role, "rounds": 0, "task_calls": []},
-            config=config,
-        )
-    except Exception as exc:  # noqa: BLE001 —— 统一转成 error 事件推给前端
-        message = str(exc)
-        if "MissingApiKeyError" in type(exc).__name__ or "DASHSCOPE_API_KEY" in message:
-            message = "服务端未配置大模型 API Key，请运维检查 .env"
-        trace_event("error", message=message[:500])
-        raise
+    # 人工确认循环（LangGraph HITL 的标准写法）：
+    # graph.ainvoke 因 interrupt 挂起时抛 GraphInterrupt → 发 interrupt 事件给前端 →
+    # 等用户决定（decide 回调，可能几十秒）→ 用 Command(resume=决定) 恢复原图继续跑。
+    # 注意恢复时传的必须是 Command(resume=...)，而不是原始输入，否则会重新开始。
+    inputs: Any = {"messages": [HumanMessage(question)], "role": role, "rounds": 0, "task_calls": []}
+    while True:
+        try:
+            state = await graph.ainvoke(inputs, config=config)
+        except GraphInterrupt as interrupted:
+            # 兼容旧版/流式场景：部分版本仍以异常形式抛出中断
+            payload = interrupted.args[0] if interrupted.args else {}
+            trace_event("interrupt", **payload)
+            if decide is None:
+                # 无确认通道（比如命令行脚本）：一律拒绝，绝不静默放行
+                decision: dict[str, Any] = {"approved": False, "reason": "当前通道不支持人工确认"}
+            else:
+                decision = await decide(payload)
+            inputs = Command(resume=decision)
+            continue
+        except Exception as exc:  # noqa: BLE001 —— 统一转成 error 事件推给前端
+            message = str(exc)
+            if "MissingApiKeyError" in type(exc).__name__ or "DASHSCOPE_API_KEY" in message:
+                message = "服务端未配置大模型 API Key，请运维检查 .env"
+            trace_event("error", message=message[:500])
+            raise
+        # LangGraph 1.2 的 ainvoke 不再抛 GraphInterrupt，而是把中断放进返回状态：
+        # state["__interrupt__"] = [Interrupt(value=..., id=...)]
+        interrupts = state.get("__interrupt__")
+        if not interrupts:
+            break
+        interrupted_item = interrupts[-1]  # 多中断按顺序恢复，取最外层一个
+        payload = getattr(interrupted_item, "value", interrupted_item)
+        if not isinstance(payload, dict):
+            payload = {"message": str(payload)}
+        trace_event("interrupt", **payload)
+        if decide is None:
+            # 无确认通道（比如命令行脚本）：一律拒绝，绝不静默放行
+            decision: dict[str, Any] = {"approved": False, "reason": "当前通道不支持人工确认"}
+        else:
+            decision = await decide(payload)
+        inputs = Command(resume=decision)
 
     answer = ""
     for msg in reversed(state["messages"]):

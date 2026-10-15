@@ -20,6 +20,10 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from ..agents import graph
 from ..agents.trace import MAX_QUEUE_SIZE
 from .auth import check_ws_token, resolve_role
+from . import pending
+
+# 人工确认等待时长（同 SSE）
+CONFIRM_TIMEOUT_SECONDS = 300
 
 router = APIRouter()
 
@@ -49,7 +53,17 @@ async def ws_chat(websocket: WebSocket) -> None:
     role = resolve_role(first.get("role"))
     session_id = str(first.get("session_id") or "default")
     queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=MAX_QUEUE_SIZE)
-    task = asyncio.create_task(graph.arun(message, session_id, role, queue=queue))
+
+    async def decide(payload: dict) -> dict:
+        # WebSocket 是双向的，但确认回执统一走 REST（与 SSE 共用一条路径，少一套实现）
+        future = pending.register(session_id)
+        try:
+            decision = await asyncio.wait_for(future, timeout=CONFIRM_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            decision = {"approved": False, "reason": "确认超时，按拒绝处理"}
+        return decision
+
+    task = asyncio.create_task(graph.arun(message, session_id, role, queue=queue, decide=decide))
 
     async def sender() -> None:
         """发送协程：独立于接收协程，业务只往 queue 丢，互不阻塞。"""
@@ -82,6 +96,7 @@ async def ws_chat(websocket: WebSocket) -> None:
         if not task.done():
             task.cancel()
         send_task.cancel()
+        pending.cleanup(session_id)
         try:
             await websocket.close()
         except RuntimeError:

@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from .. import database, rag
 from ..agents.trace import trace_event
 from ..services import device_service
+from . import pending
 from .auth import check_token
 
 router = APIRouter(dependencies=[Depends(check_token)])
@@ -22,6 +23,23 @@ class UploadResult(BaseModel):
     document_id: str
     chunk_count: int
     strategy: str
+
+
+class ConfirmBody(BaseModel):
+    session_id: str
+    approved: bool
+    comment: str = ""
+
+
+@router.post("/chat/confirm")
+def confirm_decision(body: ConfirmBody) -> dict:
+    """人工确认回执：前端收到 interrupt 事件、用户点完按钮后回调这里。
+
+    只负责「唤醒」等待中的 Agent 会话；真正的写入动作仍然由
+    config_service.apply_change 在确认通过后执行（本接口本身不做任何数据库修改）。
+    """
+    ok = pending.resolve(body.session_id, {"approved": body.approved, "comment": body.comment})
+    return {"ok": ok, "message": "已提交" if ok else "该会话当前没有等待确认的操作"}
 
 
 @router.get("/devices")

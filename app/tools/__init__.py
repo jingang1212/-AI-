@@ -11,10 +11,12 @@ from __future__ import annotations
 
 from langchain_core.tools import BaseTool
 
+from .chart import draw_trend_chart
 from .device import device_status, query_data
 from .knowledge import knowledge_search
 from .report import generate_report
 from .skill import list_skills, load_skill
+from .write import update_device_config
 
 # 全部工具的名字 -> 实例，员工 Agent 内部按名字取工具用
 ALL_TOOLS: dict[str, BaseTool] = {
@@ -25,6 +27,8 @@ ALL_TOOLS: dict[str, BaseTool] = {
         query_data,         # 监测数据聚合查询
         generate_report,    # 报告落盘
         load_skill,         # 技能手册按需加载
+        draw_trend_chart,   # 监测数据趋势折线图（数据库真实值）
+        update_device_config,  # 设备配置写操作（需人工确认）
     )
 }
 
@@ -34,8 +38,9 @@ ALL_TOOLS: dict[str, BaseTool] = {
 #   领导不关心波特率，减少工具数量还能降低模型乱调用的概率（工具越多越容易选错）；
 # service（客服）：只查知识库，回答政策口径问题，不碰任何业务数据。
 ROLE_TOOLS: dict[str, list[str]] = {
-    "ops": ["knowledge_search", "device_status", "query_data", "generate_report", "load_skill"],
-    "leader": ["knowledge_search", "query_data", "generate_report"],
+    "ops": ["knowledge_search", "device_status", "query_data", "generate_report", "load_skill",
+            "draw_trend_chart", "update_device_config"],
+    "leader": ["knowledge_search", "query_data", "generate_report", "draw_trend_chart"],
     "service": ["knowledge_search"],
 }
 
@@ -76,6 +81,7 @@ __all__ = [
     "ROLE_TOOLS",
     "DEFAULT_ROLE",
     "device_status",
+    "draw_trend_chart",
     "generate_report",
     "knowledge_search",
     "list_skills",
@@ -83,4 +89,5 @@ __all__ = [
     "query_data",
     "role_prompt",
     "tools_for_role",
+    "update_device_config",
 ]

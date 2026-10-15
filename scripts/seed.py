@@ -24,7 +24,7 @@ def main():
 
     # 清空既有演示数据，保证脚本可重复执行（幂等）。
     # 顺序：从「引用方」往「被引用方」删，避免外键约束报错。
-    for table in ("alarm", "device_heartbeat", "monitor_data", "h_cems_station_device",
+    for table in ("op_log", "device_config", "alarm", "device_heartbeat", "monitor_data", "h_cems_station_device",
                   "h_cems_device", "h_cems_station", "t_company"):
         database.execute(f"DELETE FROM {table}")
 
@@ -96,6 +96,23 @@ def main():
             "INSERT INTO alarm (station_id, device_id, ts, level, title, status) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (station_id, device_id, (now_dt - timedelta(minutes=30)).strftime(TS_FORMAT), level, title, status),
+        )
+
+    # 设备配置表（AI 助手写操作的对象）：
+    # 3 号设备当前波特率是 19200，故意和「故障案例库」里 FA-2026-002 呼应，
+    # 用户问「改成 9600」时，助手就能走「读旧值 → 请求确认 → 写入 → 留痕」完整链路。
+    configs = [
+        (1, "baud_rate", "9600"),
+        (2, "baud_rate", "9600"),
+        (3, "baud_rate", "19200"),
+        (3, "report_addr", "https://iot.example.com:8443/report"),
+        (3, "sample_interval", "15"),
+        (7, "baud_rate", "9600"),
+    ]
+    for device_id, param, value in configs:
+        database.execute(
+            "INSERT INTO device_config (device_id, param, value, updated_at) VALUES (?, ?, ?, ?)",
+            (device_id, param, value, now_dt.strftime(TS_FORMAT)),
         )
     print("演示数据已写入")
 

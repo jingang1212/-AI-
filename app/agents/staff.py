@@ -74,17 +74,23 @@ STAFF_SPECS: dict[str, dict[str, Any]] = {
         "description": (
             "设备运维专员。擅长查看电子证据鉴定仪的在线状态、心跳、电压、磁盘、"
             "采集程序运行情况，查询站点监测数据，并给出断电/断网/程序未启动/协议不匹配"
-            "等现场故障的排查步骤。"
+            "等现场故障的排查步骤；也能修改设备配置参数（波特率、上报地址、采样周期），"
+            "这类写操作会先弹出确认、用户批准后才生效并留操作日志。"
         ),
         "prompt": (
             "你是电子证据鉴定仪的运维专员，服务对象是现场安装/运维工程师。\n"
+            "硬规则（违反即为错误回答）：用户明确要求修改设备配置参数（波特率/上报地址/采样周期）时，"
+            "本轮第一步必须直接调用 update_device_config 工具，禁止用文字描述操作步骤代替调用，"
+            "也禁止先调用 device_status 再自行判断；人工确认弹窗由该工具自动触发，"
+            "是否批准由前端用户决定，不归你判断。\n"
             "工作方式：先 device_status 看设备实时状态和告警；需要趋势时用 query_data；"
             "涉及处理步骤时用 knowledge_search 查运维 SOP，必要时 load_skill 读手册。\n"
             "硬性要求：结论只能基于工具返回的数据，不允许猜测设备编号或数值；"
             "给出建议时按「先看什么、再看什么、怎么处理」的顺序写成分步。\n"
             "输出：给主管看的紧凑结论（250 字内），带关键数值。"
         ),
-        "tools": ["device_status", "query_data", "knowledge_search", "load_skill"],
+        "tools": ["device_status", "query_data", "knowledge_search", "load_skill",
+                  "update_device_config"],
     },
     "report_staff": {
         "description": (
@@ -100,7 +106,7 @@ STAFF_SPECS: dict[str, dict[str, Any]] = {
             "要么给出具体数值对比，要么说明数据不足。\n"
             "输出：给主管看的结论（说明报告已生成、关键发现是什么），200 字内。"
         ),
-        "tools": ["query_data", "knowledge_search", "generate_report"],
+        "tools": ["query_data", "knowledge_search", "generate_report", "draw_trend_chart"],
     },
 }
 
@@ -132,7 +138,7 @@ async def run_staff(staff_name: str, task: str, role: str) -> str:
         # 空字符串会让主管以为「员工查了但没结果」，进而反复重试。
         return f"[{staff_name}] 当前用户角色（{role}）无权使用该员工的工具，任务未执行。"
 
-    llm = get_chat_model().bind_tools(staff_tools)
+    base_llm = get_chat_model()
     messages: list[Any] = [
         SystemMessage(spec["prompt"]),
         HumanMessage(task),
@@ -141,7 +147,17 @@ async def run_staff(staff_name: str, task: str, role: str) -> str:
 
     last_text = ""
     for step in range(MAX_STEPS):
-        ai = await llm.ainvoke(messages)
+        # 第一步强制调用工具（和主管第一轮同一策略）：
+        # 员工默认也喜欢「先说一段话再干活」，对于写操作请求这会让
+        # 确认链路永远走不到 update_device_config——所以第一步不允许空谈。
+        if step == 0:
+            bound = base_llm.bind_tools(staff_tools, tool_choice="required")
+            try:
+                ai = await bound.ainvoke(messages)
+            except Exception:  # noqa: BLE001 —— 网关不支持 required 时退回 auto
+                ai = await base_llm.bind_tools(staff_tools).ainvoke(messages)
+        else:
+            ai = await base_llm.bind_tools(staff_tools).ainvoke(messages)
         messages.append(ai)
         calls = getattr(ai, "tool_calls", None) or []
 

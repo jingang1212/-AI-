@@ -6,4 +6,5 @@ data/vectors.json
 data/reports/
 data/chroma_probe/
 data/*.log
+data/charts/
 data/*.db

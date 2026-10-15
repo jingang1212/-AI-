@@ -48,6 +48,14 @@ def init_db() -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT, station_id INTEGER,
             device_id INTEGER, ts TEXT, level TEXT, title TEXT, status TEXT
         );
+        CREATE TABLE IF NOT EXISTS device_config (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, device_id INTEGER,
+            param TEXT, value TEXT, updated_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS op_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, device_id INTEGER,
+            action TEXT, detail TEXT, operator TEXT, source TEXT, ts TEXT
+        );
         """
     )
     conn.commit()

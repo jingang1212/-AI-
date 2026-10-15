@@ -81,6 +81,19 @@ python scripts/test_stream.py        # 另开终端：SSE + WebSocket 端到端�
 鉴权：`AUTH_TOKEN`（.env，默认 `demo-token-please-change`，生产必须改）；
 角色用 `X-Role` 头（ops/leader/service），未知角色按最小权限 service 处理。
 
+## 写操作与人工确认（D5）
+
+运维角色可以让 AI 改设备配置（波特率/上报地址/采样周期）。流程：
+
+1. 员工调用 `update_device_config` 工具 → LangGraph `interrupt` 挂起；
+2. 前端收到 `interrupt` 事件弹确认框（展示原值 → 新值）；
+3. 用户点批准后，前端 `POST /api/chat/confirm {session_id, approved}`；
+4. Agent 恢复执行，参数化 SQL 写入并记 `op_log` 审计日志。
+
+参数白名单外的请求一律拒绝，SQL 全部参数化，只改单表单行。
+机制验证：`python scripts/test_confirm_unit.py`（不需要网络，
+覆盖批准/拒绝/白名单三条路径）。
+
 ## 两个角色能看到什么
 
 | 角色 | 可用工具 | 典型问题 |

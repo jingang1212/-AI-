@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from .. import config, database, vectorstore
 from ..console import setup_console
@@ -49,6 +50,12 @@ app.add_middleware(
 app.include_router(rest.router, prefix="/api")
 app.include_router(sse_chat.router)
 app.include_router(ws_chat.router)
+
+# 图表静态目录：draw_trend_chart 生成的 PNG 落在这里，
+# 前端拿到 image 事件里的 /charts/xxx.png 后直接 <img> 引用
+CHARTS_DIR = config.DATA_DIR / "charts"
+CHARTS_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/charts", StaticFiles(directory=str(CHARTS_DIR)), name="charts")
 
 
 @app.get("/healthz")

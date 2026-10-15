@@ -137,5 +137,10 @@ async def arun(question: str, thread_id: str, role: str) -> dict[str, Any]:
         if isinstance(msg, AIMessage) and not getattr(msg, "tool_calls", None):
             answer = msg.content if isinstance(msg.content, str) else str(msg.content)
             break
+    if not answer.strip():
+        # 兜底：熔断或被模型限流时可能真的没有正文。
+        # 宁可给用户一句可理解的说明，也不要返回空字符串让前端显示一片空白
+        # ——空响应在前端通常表现为「转圈不动」，用户会以为系统坏了。
+        answer = "本次分析未能在有限的调度轮次内收敛，请把问题拆小一些再问一次（例如先问设备状态，再问数据分析）。"
     trace_event("complete", answer=answer[:500])
     return {"answer": answer, "events": events, "rounds": int(state.get("rounds", 0))}

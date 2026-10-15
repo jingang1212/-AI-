@@ -2,4 +2,7 @@
 __pycache__/
 .venv/
 data/chroma/
+data/vectors.json
+data/reports/
+data/chroma_probe/
 data/*.db

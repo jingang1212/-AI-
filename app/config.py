@@ -27,6 +27,10 @@ RERANK_URL = os.getenv(
 )
 BASE_URL = os.getenv("BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
+# 业务时区。设备上报、报表统计、用户提问全部按这个时区对齐，
+# 详见 app/timeutil.py 里的说明（时区不一致会导致「查不到数据」的假故障）。
+TZ_NAME = os.getenv("TZ_NAME", "Asia/Shanghai")
+
 # 是否开启「思考模式」。默认关闭，原因（实测踩坑）：
 # qwen3.8-flash 默认开思考，此时传 tool_choice="required" 会直接 400：
 # «The tool_choice parameter does not support being set to required or object in thinking mode»。
@@ -34,6 +38,11 @@ BASE_URL = os.getenv("BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode
 # 需要深度分析时可临时开：ENABLE_THINKING=true
 ENABLE_THINKING = os.getenv("ENABLE_THINKING", "false").strip().lower() in {"1", "true", "yes"}
 
+
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 100
 DEFAULT_TOP_K = 5
+
+# 向量维度：qwen3.7-text-embedding 实测返回 1024 维。
+# 换模型必须同步改这里 + Milvus collection 的 dim，否则写入直接报错。
+EMBED_DIM = int(os.getenv("EMBED_DIM", "1024"))

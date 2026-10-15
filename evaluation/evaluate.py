@@ -1,4 +1,9 @@
-"""检索评测：recall@k。用法：python evaluation/evaluate.py"""
+"""检索评测：recall@k。用法：python evaluation/evaluate.py
+
+recall@k 的算法：对评测集里每条问题，取检索 TopK 的来源列表，
+如果期望文档在列表里就记一次命中；最终 命中数 / 总条数 即 recall@k。
+这个指标衡量「该召回的文档有没有被召回到」，不判断排序好坏（排序用 MRR/NDCG）。
+"""
 
 import json
 import sys
@@ -7,6 +12,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import rag
+from app.console import setup_console
+
+setup_console()
 
 
 def evaluate(eval_file: str, top_k: int) -> float:

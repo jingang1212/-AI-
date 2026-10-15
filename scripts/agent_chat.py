@@ -17,7 +17,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.agents.graph import arun  # noqa: E402
+from app.console import setup_console  # noqa: E402
 from app.tools import DEFAULT_ROLE, ROLE_PROMPTS  # noqa: E402
+
+setup_console()
 
 
 def print_events(events: list[dict]) -> None:

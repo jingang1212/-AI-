@@ -6,6 +6,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import config, rag
+from app.console import setup_console
+
+setup_console()
 
 
 def main():
@@ -17,6 +20,7 @@ def main():
                 r = rag.index_document(p.name, p.read_bytes(), strategy=strategy)
                 imported.append((p.name, r["chunk_count"]))
             except Exception as e:
+                # EmbeddingError 里已经把「账户欠费/额度用尽」这类问题翻译成人话了
                 print(f"跳过 {p.name}: {e}")
     for name, n in imported:
         print(f"已索引 {name}: {n} 块")

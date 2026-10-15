@@ -36,24 +36,39 @@ def build_system_prompt(role: str) -> str:
 
     技巧点：技能目录（有哪些手册可查）用代码动态生成后写进提示词，
     新增手册不用改提示词——这也叫「提示词与数据解耦」。
+
+    同样地，**员工清单也按当前角色实际可用的员工动态生成**：
+    如果提示词里写了三个员工、但工具只绑了两个，
+    模型会反复尝试调用那个不存在的员工，然后被报错打断，
+    表现为「答非所问 + 反复道歉」——这是提示词和工具不一致的典型症状。
     """
     skills = tool_registry.list_skills()
     skill_line = "、".join(skills) if skills else "（暂无）"
+    available = [t.name for t in build_staff_tools(role)]
+    staff_lines = [
+        f"- {name}：{STAFF_INTRO[name]}" for name in available if name in STAFF_INTRO
+    ]
+    staff_block = "\n".join(staff_lines) if staff_lines else "（当前角色无可用员工）"
     return (
         "你是环保监测智能运维平台的主管，负责把用户的问题拆解后交给合适的员工处理，"
         "最后用一段话把结果整理给用户。\n\n"
         f"{tool_registry.role_prompt(role)}\n\n"
         f"可查的技能手册：{skill_line}\n\n"
-        "员工说明：\n"
-        "- knowledge_staff：查法规、标准、手册、SOP（政策与知识类问题）\n"
-        "- ops_staff：查设备状态、心跳、告警、监测数据，做现场排障（安装运维类问题）\n"
-        "- report_staff：查数据 + 找法规依据 + 生成分析报告（总结汇报类问题）\n\n"
+        f"当前可调度的员工（只允许调用以下这几个）：\n{staff_block}\n\n"
         "工作规则：\n"
         "1. 一次可以同时派多个员工（并行执行），互不依赖的任务请尽量一起派；\n"
         "2. 员工返回结果后，如果信息已经足够回答用户，就不要再派活，直接给出最终回答；\n"
         "3. 最终回答用中文、结论先行，涉及数据或条款要写明来源；\n"
         "4. 不确定用户指的是哪个站点/设备时，在回答里说明需要用户补充编号，不要随便挑一个。"
     )
+
+
+# 员工一句话简介：只在这里写一次，提示词按可用性动态拼装
+STAFF_INTRO: dict[str, str] = {
+    "knowledge_staff": "查法规、标准、手册、SOP（政策与知识类问题）",
+    "ops_staff": "查设备状态、心跳、告警、监测数据，做现场排障（安装运维类问题）",
+    "report_staff": "查数据 + 找法规依据 + 生成分析报告（总结汇报类问题）",
+}
 
 
 async def supervisor_node(state: AgentState) -> dict[str, Any]:

@@ -36,8 +36,31 @@ def bm25_rank(query: str, texts: list[str], limit: int = 20) -> list[tuple[int, 
     """BM25L 打分，返回 (index, score)，过滤 0 分（与 query 无词重叠）。"""
     if not texts:
         return []
-    bm25 = BM25L([tokenize(t) for t in texts])
-    scores = bm25.get_scores(tokenize(query))
+    return rank_with_index(query, build_index(texts), limit=limit)
+
+
+def build_index(texts: list[str]) -> BM25L | None:
+    """构建 BM25 索引。
+
+    为什么要单独拆出来？（性能坑，面试可讲）
+    最初的实现是「每次查询都把全文重新分词 + 重建索引」，
+    语料 1 万字时无感，语料几十万字时每次问答要多花 1~2 秒纯 CPU 时间——
+    而且这部分开销和大模型调用是串行的，用户感知非常明显。
+    拆出来后由调用方按「语料版本号」缓存索引，语料不变就不重建。
+    """
+    if not texts:
+        # rank_bm25 的 BM25L([]) 会直接 ZeroDivisionError（avgdl = num_doc / corpus_size）。
+        # 空语料是完全合法的情况（刚初始化、还没导入文档），这里必须挡住，
+        # 否则「知识库为空」会以一个看不懂的除零错误暴露给用户。
+        return None
+    return BM25L([tokenize(t) for t in texts])
+
+
+def rank_with_index(query: str, index: BM25L | None, limit: int = 20) -> list[tuple[int, float]]:
+    """用已有索引打分。返回 (语料下标, 分数)，已按分数降序，0 分（无词重叠）被过滤。"""
+    if index is None:
+        return []
+    scores = index.get_scores(tokenize(query))
     ranked = sorted(range(len(scores)), key=lambda i: -scores[i])
     return [(i, float(scores[i])) for i in ranked if scores[i] > 0][:limit]
 

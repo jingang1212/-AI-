@@ -18,11 +18,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
 from langchain_core.tools import tool
 
 from .. import database
+from ..timeutil import hours_ago_str, now, parse
 
 # 心跳超过这个秒数没来，就判定为「离线」。
 # 设备每分钟发一次心跳，容忍 3 个周期（3 分钟）的抖动，避免误报。
@@ -69,10 +68,17 @@ def device_status(device_id: str) -> str:
         "FROM device_heartbeat WHERE device_id = ? ORDER BY ts DESC LIMIT 1",
         (db_id,),
     )
+    # 告警既有挂在设备上的，也有挂在站点上的（例如「站点数据中断」），
+    # 所以两条路径都要查：设备维度 + 该设备所属站点的维度。
+    # 只查设备维度会漏掉站点级告警，现场排查时表现为「明明有告警但助手说没有」。
     alarms = database.query(
-        "SELECT ts, level, title, status FROM alarm WHERE device_id = ? "
-        "ORDER BY ts DESC LIMIT 3",
-        (db_id,),
+        "SELECT ts, level, title, status, 'device' AS scope FROM alarm WHERE device_id = ? "
+        "UNION ALL "
+        "SELECT a.ts, a.level, a.title, a.status, 'station' AS scope FROM alarm a "
+        "JOIN h_cems_station_device sd ON sd.station_id = a.station_id "
+        "WHERE sd.device_id = ? AND a.station_id IS NOT NULL "
+        "ORDER BY ts DESC LIMIT 5",
+        (db_id, db_id),
     )
     device_name = database.query("SELECT name FROM h_cems_device WHERE id = ?", (db_id,))[0]["name"]
 
@@ -84,10 +90,8 @@ def device_status(device_id: str) -> str:
         )
 
     hb = heartbeats[0]
-    last_ts = datetime.fromisoformat(str(hb["ts"]).replace("Z", "+00:00"))
-    if last_ts.tzinfo is None:
-        last_ts = last_ts.replace(tzinfo=timezone.utc)
-    age = (datetime.now(timezone.utc) - last_ts).total_seconds()
+    last_ts = parse(hb["ts"])
+    age = (now() - last_ts).total_seconds()
     online = age <= OFFLINE_AFTER_SECONDS
 
     lines = [
@@ -116,7 +120,11 @@ def device_status(device_id: str) -> str:
     if (hb["voltage"] or 0) < 11:
         hints.append("电压偏低：可能是 UPS/电源适配器老化，长时间低压会导致主板反复重启。")
     if alarms:
-        hint = "；".join(f"{a['ts']} [{a['level']}] {a['title']}（{a['status']}）" for a in alarms)
+        hint = "；".join(
+            f"{a['ts']} [{a['level']}·{'设备' if a['scope'] == 'device' else '站点'}] "
+            f"{a['title']}（{a['status']}）"
+            for a in alarms
+        )
         hints.append(f"最近告警：{hint}")
     if not hints:
         hints.append("各项指标正常，未发现异常。")
@@ -135,7 +143,7 @@ def query_data(station_id: int, metric: str = "二氧化硫", hours: int = 24) -
         hours: 查询最近多少小时，默认 24，最大 168（7 天）。
     """
     hours = max(1, min(int(hours), 168))  # 夹紧范围：防止模型给出 99999 小时把库拖死
-    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+    since = hours_ago_str(hours)
 
     rows = database.query(
         "SELECT ts, value, unit FROM monitor_data "

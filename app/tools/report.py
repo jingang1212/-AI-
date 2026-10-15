@@ -10,12 +10,12 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
 
 from langchain_core.tools import tool
 
 from .. import config
 from ..agents.trace import trace_event
+from ..timeutil import now
 
 REPORT_DIR = config.DATA_DIR / "reports"
 
@@ -42,7 +42,7 @@ def generate_report(title: str, content: str) -> str:
             法规依据 / 结论与建议」四部分，法规依据请引用知识库检索到的原文。
     """
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    stamp = now().strftime("%Y%m%d-%H%M%S")
     path = REPORT_DIR / f"{stamp}-{_safe_filename(title)}.md"
 
     # 头部写死生成时间与工具版本，方便事后追溯——报告是要给人看、给监管看的，
@@ -52,4 +52,5 @@ def generate_report(title: str, content: str) -> str:
 
     # 推事件给前端：让它渲染一张「报告卡片」而不是一段纯文本
     trace_event("file", path=str(path), title=title)
-    return f"报告已生成：{path.name}\n完整路径：{path}\n可在前端「报告下载」中打开。"
+    # 只把文件名给模型/用户看：绝对路径是服务端实现细节，暴露出去既没用也有信息泄漏风险。
+    return f"报告已生成：{path.name}（可在前端「报告下载」中打开）"

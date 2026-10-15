@@ -6,8 +6,8 @@
 - JWT 用 PyJWT（HS256）：无状态 token，sub 放用户 ID、role 放角色，
   过期时间 exp 强制登录态过期；密钥只存服务端，客户端无法伪造。
 
-⚠️ 生产注意：HS256 密钥要放密钥管理（KMS/环境变量注入），
-且登录接口要加限流防爆破（本项目还缺，见审查记录 P0 清单）。
+⚠️ 生产注意：HS256 密钥要放密钥管理（KMS/环境变量注入）；
+登录接口已加「账号+IP」滑动窗口限流（app/ratelimit.py），多副本部署需换 Redis 共享计数。
 """
 
 from __future__ import annotations

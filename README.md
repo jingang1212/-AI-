@@ -23,7 +23,7 @@ app/
   vectorstore.py     # 向量库：Milvus（默认嵌入式 Lite，服务端同套代码，失败不降级）
   hybrid.py          # 中文分词 + BM25L + RRF 融合
   rerank.py          # qwen3.7-text-rerank 精排
-  rag.py             # 解析 → 分块 → 入库 → 混合检索
+  rag.py             # 解析 → 父子拆分(小块索引/大块上下文) → 入库 → 混合检索
   database.py        # 业务数据层（演示用 SQLite，接口对齐 MySQL）
   timeutil.py        # 统一时区口径（踩过坑，务必用它取时间）
   console.py         # Windows 控制台 UTF-8 修复
@@ -31,16 +31,18 @@ app/
   agents/            # LangGraph 多智能体：主管 + 知识/运维/报告三个员工
 scripts/
   check_api.py       # 接口自检（不需要装依赖就能跑）
-  ingest.py          # 文档批量入库
+  ingest.py          # 文档批量入库（md 默认按标题分块）
   query.py           # 检索单测
   seed.py            # 造演示数据（幂等，可重复执行）
   agent_chat.py      # 命令行跑完整多智能体对话
+  run_offline_tests.py  # 离线测试汇总入口（CI 门禁）
 evaluation/
   eval_set.json      # 59 条评测问题（问题 → 期望来源文档）
   evaluate.py        # recall@k
 data/
   docs/              # 知识库语料（法规/标准/手册/SOP/案例库）
   skills/            # 技能手册（按需加载，不占系统提示词）
+  traces.jsonl       # 请求级轨迹与 token 用量（自动追加，git 忽略）
 frontend/
   index.html         # Vite 入口
   package.json       # 前端依赖与脚本（dev / build）
@@ -154,6 +156,7 @@ python scripts/test_milvus.py        # Milvus 机制测试（离线）：schema/
 - 数据文件（`data/app.db`、`data/vectors.json`、`data/reports/`）同样不入库；
 - 换 embedding 模型必须重新全量入库，并同步修改 `EMBED_DIM`；
 - 云端账户欠费时，接口会返回 `Arrearage`，代码会给出中文提示（详见审查记录）。
+- 登录接口有防爆破限流：同一「账号+IP」每分钟最多 5 次失败，连续输错会被暂时拒绝（429）。
 
 ## Redis 的应用位置（两个场景）
 

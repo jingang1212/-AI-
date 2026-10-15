@@ -44,21 +44,34 @@ def _normalize(vector: list[float]) -> list[float]:
 
 
 class MilvusStore:
-    """Milvus 实现：嵌入式（Lite）与服务端共用一套 API。"""
+    """Milvus 实现：嵌入式（Lite）与服务端共用一套 API。
 
-    def __init__(self) -> None:
+    collection 参数允许测试/工具使用独立集合，避免与正式知识库互相污染。
+    """
+
+    def __init__(self, collection: str | None = None) -> None:
         from pymilvus import MilvusClient
 
+        self.collection = collection or config.MILVUS_COLLECTION
         # Lite：uri 传本地文件路径；服务端：传 http(s) 地址。token 用于托管版鉴权。
         self.client = MilvusClient(uri=config.MILVUS_URI, token=config.MILVUS_TOKEN or None)
         self._ensure_collection()
+
+    @staticmethod
+    def drop_collection_safe(collection: str) -> None:
+        """用原始客户端删集合：兼容旧 schema 无法通过体检的场景（升级/测试清理）。"""
+        from pymilvus import MilvusClient
+
+        client = MilvusClient(uri=config.MILVUS_URI, token=config.MILVUS_TOKEN or None)
+        if client.has_collection(collection):
+            client.drop_collection(collection)
 
     # ---- 建表 ---------------------------------------------------------------
 
     def _ensure_collection(self) -> None:
         from pymilvus import DataType
 
-        if not self.client.has_collection(config.MILVUS_COLLECTION):
+        if not self.client.has_collection(self.collection):
             # 显式 schema。两个实测坑（写进审查记录）：
             # 1) MilvusClient 的快速建表（dimension=...）默认把主键推断成 INT64，
             #    传字符串主键会报 DataNotMatchException；
@@ -69,10 +82,16 @@ class MilvusStore:
             schema.add_field("vector", DataType.FLOAT_VECTOR, dim=config.EMBED_DIM)
             schema.add_field("content", DataType.VARCHAR, max_length=65535)
             schema.add_field("kb_id", DataType.VARCHAR, max_length=64)
+            schema.add_field("tenant_id", DataType.VARCHAR, max_length=64)
             schema.add_field("source", DataType.VARCHAR, max_length=256)
             schema.add_field("document_id", DataType.VARCHAR, max_length=64)
             schema.add_field("chunk_index", DataType.INT64)
             schema.add_field("strategy", DataType.VARCHAR, max_length=32)
+            schema.add_field("heading_path", DataType.VARCHAR, max_length=512)
+            schema.add_field("start_index", DataType.INT64)
+            schema.add_field("end_index", DataType.INT64)
+            schema.add_field("parent_id", DataType.VARCHAR, max_length=128)
+            schema.add_field("parent_text", DataType.VARCHAR, max_length=65535)
 
             index_params = self.client.prepare_index_params()
             index_params.add_index(
@@ -84,19 +103,33 @@ class MilvusStore:
             # 标量过滤字段建倒排索引：没有它 filter 会退化成暴力扫描
             index_params.add_index(field_name="kb_id", index_type="INVERTED")
             index_params.add_index(field_name="document_id", index_type="INVERTED")
+            index_params.add_index(field_name="tenant_id", index_type="INVERTED")
             self.client.create_collection(
-                collection_name=config.MILVUS_COLLECTION, schema=schema, index_params=index_params
+                collection_name=self.collection, schema=schema, index_params=index_params
             )
             # Milvus 服务端语义：集合要先 load 到内存才能 search/query。
             # 新集合是 released 状态，不 load 会报 code=101。
-            self.client.load_collection(config.MILVUS_COLLECTION)
+            self.client.load_collection(self.collection)
             return
 
         # 已存在：确保加载（重复 load 幂等）。Lite 模式跳过也行，统一处理最稳。
-        self.client.load_collection(config.MILVUS_COLLECTION)
-        # 已存在的 collection 做维度体检：换 embedding 模型没重建表时，
-        # 错误会以「向量维度不匹配」的诡异形态出现，这里提前拦住。
-        fields = self.client.describe_collection(config.MILVUS_COLLECTION).get("fields", [])
+        self.client.load_collection(self.collection)
+        # 已存在的 collection 做 schema 体检：
+        # 1) 字段齐全性——升级 schema 后旧集合缺字段，必须重建；
+        # 2) 向量维度——换 embedding 模型没重建表时，错误会以诡异形态出现。
+        fields = self.client.describe_collection(self.collection).get("fields", [])
+        field_names = {f.get("name") for f in fields}
+        required = {
+            "chunk_id", "vector", "content", "kb_id", "tenant_id", "source",
+            "document_id", "chunk_index", "strategy", "heading_path", "start_index", "end_index",
+            "parent_id", "parent_text",
+        }
+        missing = required - field_names
+        if missing:
+            raise RuntimeError(
+                f"Milvus collection 缺少字段 {sorted(missing)}：schema 已升级，"
+                "请先停掉服务，执行 python scripts/ingest.py --reset 重新入库，再重启服务"
+            )
         for field in fields:
             if field.get("type") == 101 and str(field.get("params", {}).get("dim")) != str(
                 config.EMBED_DIM
@@ -112,7 +145,7 @@ class MilvusStore:
         if not rows:
             return
         # upsert：主键相同即覆盖，对应「同名文档重新导入 = 覆盖」语义
-        self.client.upsert(collection_name=config.MILVUS_COLLECTION, data=rows)
+        self.client.upsert(collection_name=self.collection, data=rows)
 
     def add_chunks(self, chunks: list[dict]) -> None:
         """chunks: [{"text", "metadata"}] → 向量化 + upsert。"""
@@ -132,10 +165,16 @@ class MilvusStore:
                     "vector": _normalize(vector),
                     "content": chunk["text"],
                     "kb_id": meta.get("kb_id", "kb_general"),
+                    "tenant_id": meta.get("tenant_id", "default"),
                     "source": meta.get("source", ""),
                     "document_id": meta.get("document_id", ""),
                     "chunk_index": int(meta.get("chunk_index", 0)),
                     "strategy": meta.get("strategy", ""),
+                    "heading_path": (meta.get("heading_path") or "")[:512],
+                    "start_index": int(meta.get("start", 0)),
+                    "end_index": int(meta.get("end", 0)),
+                    "parent_id": meta.get("parent_id", ""),
+                    "parent_text": meta.get("parent_text", ""),
                 }
             )
         self._insert_rows(rows)
@@ -143,7 +182,7 @@ class MilvusStore:
     def delete_document(self, document_id: str) -> int:
         """按 document_id 删除全部 chunk（改版重新导入前清旧尾巴）。"""
         deleted = self.client.delete(
-            collection_name=config.MILVUS_COLLECTION,
+            collection_name=self.collection,
             filter=f'document_id == "{document_id}"',
         )
         return int(deleted.get("delete_count", 0)) if isinstance(deleted, dict) else 0
@@ -160,14 +199,18 @@ class MilvusStore:
     def search(self, query: str, top_k: int = config.DEFAULT_TOP_K, where: dict | None = None) -> list[dict]:
         """向量检索：embed(query) → Milvus HNSW 检索 + 标量过滤。"""
         hits = self.client.search(
-            collection_name=config.MILVUS_COLLECTION,
+            collection_name=self.collection,
             data=[_normalize(embed_query(query))],
             limit=top_k,
             filter=self._expr(where),
             search_params={"metric_type": "COSINE", "params": {"ef": 64}},
             # 必须显式包含主键 chunk_id：自定义主键不会被自动返回，
             # 漏了它 entity 里没有 key，RAG 层合并时会把所有命中塌成同一个空 key
-            output_fields=["chunk_id", "content", "source", "kb_id"],
+            output_fields=[
+                "chunk_id", "content", "source", "kb_id", "document_id",
+                "chunk_index", "heading_path", "start_index", "end_index",
+                "parent_id", "parent_text",
+            ],
         )
         return [
             {
@@ -175,6 +218,14 @@ class MilvusStore:
                 "text": h["entity"].get("content", ""),
                 "source": h["entity"].get("source"),
                 "score": round(float(h["distance"]), 4),  # COSINE 度量下 distance 就是相似度
+                "kb_id": h["entity"].get("kb_id"),
+                "document_id": h["entity"].get("document_id"),
+                "chunk_index": h["entity"].get("chunk_index"),
+                "heading_path": h["entity"].get("heading_path", ""),
+                "start": h["entity"].get("start_index", 0),
+                "end": h["entity"].get("end_index", 0),
+                "parent_id": h["entity"].get("parent_id", ""),
+                "parent_text": h["entity"].get("parent_text", ""),
             }
             for h in (hits[0] if hits else [])
         ]
@@ -191,9 +242,12 @@ class MilvusStore:
         out: list[dict] = []
         while True:
             page = self.client.query(
-                collection_name=config.MILVUS_COLLECTION,
+                collection_name=self.collection,
                 filter="",
-                output_fields=["chunk_id", "content", "source", "kb_id", "document_id"],
+                output_fields=[
+                    "chunk_id", "content", "source", "kb_id", "document_id",
+                    "heading_path", "start_index", "end_index", "parent_id", "parent_text",
+                ],
                 limit=page_size,
                 offset=offset,
             )
@@ -204,7 +258,15 @@ class MilvusStore:
                     "key": r.get("chunk_id"),
                     "text": r.get("content", ""),
                     "source": r.get("source"),
-                    "metadata": {"kb_id": r.get("kb_id"), "document_id": r.get("document_id")},
+                    "metadata": {
+                        "kb_id": r.get("kb_id"),
+                        "document_id": r.get("document_id"),
+                        "heading_path": r.get("heading_path", ""),
+                        "start": r.get("start_index", 0),
+                        "end": r.get("end_index", 0),
+                        "parent_id": r.get("parent_id", ""),
+                        "parent_text": r.get("parent_text", ""),
+                    },
                 }
                 for r in page
             )
@@ -214,7 +276,7 @@ class MilvusStore:
         return out
 
     def reset(self) -> None:
-        self.client.drop_collection(config.MILVUS_COLLECTION)
+        self.client.drop_collection(self.collection)
         self._ensure_collection()
 
 
@@ -265,7 +327,19 @@ def get_all_chunks() -> list[dict]:
 
 
 def reset() -> None:
-    _get_store().reset()
+    """清空并重建知识库。
+
+    用原始客户端直接删集合：旧集合可能缺新 schema 字段（升级场景），
+    若先走 _get_store() 的 schema 体检会直接报错、连删都删不掉。
+    """
+    from pymilvus import MilvusClient
+
+    global _store
+    _store = None  # 旧单例失效，重建后按新 schema 初始化
+    client = MilvusClient(uri=config.MILVUS_URI, token=config.MILVUS_TOKEN or None)
+    if client.has_collection(config.MILVUS_COLLECTION):
+        client.drop_collection(config.MILVUS_COLLECTION)
+    _get_store()
     _bump()
 
 

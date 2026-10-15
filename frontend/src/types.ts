@@ -32,6 +32,7 @@ export interface Step {
 export interface Reference {
   source: string
   score?: number | string
+  heading?: string
 }
 
 export interface MediaItem {
@@ -68,7 +69,7 @@ export type ChatEvent =
   | { type: 'tool.call'; staff?: string; name: string; args?: unknown }
   | { type: 'tool.result'; staff?: string; name?: string; output?: string }
   | { type: 'staff.end'; staff: string; output?: string }
-  | { type: 'reference.source'; source: string; score?: number }
+  | { type: 'reference.source'; source: string; score?: number; heading?: string; start?: number; end?: number }
   | { type: 'image'; url: string; title?: string }
   | { type: 'file'; url: string; filename?: string; title?: string }
   | { type: 'interrupt'; kind?: string; title?: string; question?: string; proposal?: Proposal }

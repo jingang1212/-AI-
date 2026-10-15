@@ -143,6 +143,11 @@ async def _astream_merged(bound, messages: list[Any]) -> AIMessage:
     kwargs: dict[str, Any] = {"content": content}
     if tool_calls:
         kwargs["tool_calls"] = tool_calls
+    # 保留用量与响应元信息：token 统计/可观测性依赖它（重建 AIMessage 时默认会丢）
+    if getattr(merged, "usage_metadata", None):
+        kwargs["usage_metadata"] = merged.usage_metadata
+    if getattr(merged, "response_metadata", None):
+        kwargs["response_metadata"] = merged.response_metadata
     return AIMessage(**kwargs)
 
 

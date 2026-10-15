@@ -25,6 +25,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import sys
+import time
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -158,6 +161,7 @@ async def arun(
     - decide：可选。`async def decide(payload) -> dict`，在写操作工具触发 interrupt 时
       负责「把确认请求转给前端并等用户决定」。不传则任何 interrupt 都自动拒绝。
     """
+    started_at = time.time()
     graph = get_graph()
     events = start_trace(queue)  # 开启轨迹收集，工具内部会用 trace_event 往里写
 
@@ -220,5 +224,72 @@ async def arun(
         # 宁可给用户一句可理解的说明，也不要返回空字符串让前端显示一片空白
         # ——空响应在前端通常表现为「转圈不动」，用户会以为系统坏了。
         answer = "本次分析未能在有限的调度轮次内收敛，请把问题拆小一些再问一次（例如先问设备状态，再问数据分析）。"
+    # 用量统计：主管各轮 AIMessage 的 usage + 员工侧的 staff.usage 事件
+    input_tokens = 0
+    output_tokens = 0
+    for msg in state["messages"]:
+        if not isinstance(msg, AIMessage):
+            continue
+        i, o = _usage_of(msg)
+        input_tokens += i
+        output_tokens += o
+    for e in events:
+        if e.get("type") == "staff.usage":
+            input_tokens += int(e.get("input_tokens") or 0)
+            output_tokens += int(e.get("output_tokens") or 0)
+    elapsed = round(time.time() - started_at, 2)
+    trace_event("usage", input_tokens=input_tokens, output_tokens=output_tokens, seconds=elapsed)
+    _append_trace_log(thread_id, role, question, answer, state, events, input_tokens, output_tokens, elapsed)
     trace_event("complete", answer=answer)
     return {"answer": answer, "events": events, "rounds": int(state.get("rounds", 0))}
+
+
+_TRACE_LOG = config.DATA_DIR / "traces.jsonl"
+
+
+def _usage_of(msg: AIMessage) -> tuple[int, int]:
+    """从一条 AIMessage 提取 (input_tokens, output_tokens)，兼容两种元信息形态。"""
+    usage = getattr(msg, "usage_metadata", None) or {}
+    i = int(usage.get("input_tokens") or 0)
+    o = int(usage.get("output_tokens") or 0)
+    if not i and not o:
+        token_usage = (getattr(msg, "response_metadata", None) or {}).get("token_usage") or {}
+        i = int(token_usage.get("prompt_tokens") or 0)
+        o = int(token_usage.get("completion_tokens") or 0)
+    return i, o
+
+
+def _append_trace_log(
+    thread_id: str,
+    role: str,
+    question: str,
+    answer: str,
+    state: dict[str, Any],
+    events: list[dict[str, Any]],
+    input_tokens: int,
+    output_tokens: int,
+    elapsed: float,
+) -> None:
+    """请求级轨迹落盘（每行一条 JSON）：token 用量、耗时、工具调用序列。
+
+    这是不依赖外部服务的轻量可观测性：数据落 data/traces.jsonl（git 忽略）。
+    观测路径不阻塞主链路——写失败只打一条警告，不影响对话。
+    """
+    record = {
+        "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "thread_id": thread_id,
+        "role": role,
+        "question": question[:200],
+        "answer": answer[:200],
+        "rounds": int(state.get("rounds", 0)),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "seconds": elapsed,
+        "tools": [e.get("name") for e in events if e.get("type") == "tool.call"],
+    }
+    try:
+        config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with _TRACE_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠️ 轨迹落盘失败（不影响对话）：{exc}", file=sys.stderr)

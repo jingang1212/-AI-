@@ -146,6 +146,8 @@ async def run_staff(staff_name: str, task: str, role: str) -> str:
     trace_event("staff.start", staff=staff_name, task=task)
 
     last_text = ""
+    staff_input_tokens = 0
+    staff_output_tokens = 0
     for step in range(MAX_STEPS):
         # 第一步强制调用工具（和主管第一轮同一策略）：
         # 员工默认也喜欢「先说一段话再干活」，对于写操作请求这会让
@@ -159,6 +161,9 @@ async def run_staff(staff_name: str, task: str, role: str) -> str:
         else:
             bound = base_llm.bind_tools(staff_tools)
             ai = await bound.ainvoke(messages)
+        usage = getattr(ai, "usage_metadata", None) or {}
+        staff_input_tokens += int(usage.get("input_tokens") or 0)
+        staff_output_tokens += int(usage.get("output_tokens") or 0)
         messages.append(ai)
         calls = getattr(ai, "tool_calls", None) or []
 
@@ -192,6 +197,12 @@ async def run_staff(staff_name: str, task: str, role: str) -> str:
         # for-else：循环跑满还未 break，说明到了迭代上限
         last_text = "（员工已达到最大工具调用轮数，以上为当前掌握的信息）"
 
+    trace_event(
+        "staff.usage",
+        staff=staff_name,
+        input_tokens=staff_input_tokens,
+        output_tokens=staff_output_tokens,
+    )
     trace_event("staff.end", staff=staff_name, output=last_text[:500])
     return last_text or "（员工未返回内容）"
 

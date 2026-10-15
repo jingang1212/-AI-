@@ -51,8 +51,19 @@ def knowledge_search(query: str, top_k: int = 5) -> str:
         # 相关度优先用 rerank 分（若开启），否则退回 RRF 融合分
         score = hit.get("rerank", hit.get("rrf", hit.get("score", 0)))
         text = (hit.get("text") or "").strip().replace("\n", " ")
-        lines.append(f"[{i}] 来源：{hit.get('source')}（相关度 {score}）\n{text[:SNIPPET_CHARS]}")
+        heading = hit.get("heading_path") or ""
+        location = f" · {heading}" if heading else ""
+        lines.append(
+            f"[{i}] 来源：{hit.get('source')}{location}（相关度 {score}）\n{text[:SNIPPET_CHARS]}"
+        )
         # 推给前端做「引用来源」展示：用户能点开看原文，也顺手证明检索确实命中
-        trace_event("reference.source", source=hit.get("source"), score=score)
+        trace_event(
+            "reference.source",
+            source=hit.get("source"),
+            score=score,
+            heading=heading,
+            start=hit.get("start"),
+            end=hit.get("end"),
+        )
 
     return "\n\n".join(lines)

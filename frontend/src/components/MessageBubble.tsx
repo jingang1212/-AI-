@@ -101,7 +101,7 @@ export default function MessageBubble({ msg }: { msg: Msg }) {
           {distinctRefs.length > 0 && (
             <div style={{ marginTop: 8 }}>
               {visibleRefs.map((r) => (
-                <Tag key={r.source} color="blue" style={{ marginBottom: 4 }}>📄 {r.source}{r.score != null ? `（${r.score}）` : ''}</Tag>
+                <Tag key={r.source} color="blue" style={{ marginBottom: 4 }}>📄 {r.source}{r.heading ? ` · ${r.heading}` : ''}{r.score != null ? `（${r.score}）` : ''}</Tag>
               ))}
               {distinctRefs.length > MAX_REF_CHIPS && (
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>… 另有 {distinctRefs.length - MAX_REF_CHIPS} 个来源未显示</Typography.Text>

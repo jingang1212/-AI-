@@ -58,8 +58,17 @@ ENABLE_THINKING = os.getenv("ENABLE_THINKING", "false").strip().lower() in {"1",
 
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 100
+# 父子拆分（small-to-big）：父块提供上下文，子块做索引
+PARENT_CHUNK_SIZE = 800   # 父块上限（md 按一级标题分节，超长再按此切）
+CHILD_CHUNK_SIZE = 300    # 子块长度（索引粒度）
+CHILD_CHUNK_OVERLAP = 50  # 子块重叠
 DEFAULT_TOP_K = 5
 
 # 向量维度：qwen3.7-text-embedding 实测返回 1024 维。
 # 换模型必须同步改这里 + Milvus collection 的 dim，否则写入直接报错。
 EMBED_DIM = int(os.getenv("EMBED_DIM", "1024"))
+
+# 登录限流（防暴力破解）：同一「账号 + 客户端 IP」在窗口内最多允许的失败次数。
+# 单机演示用内存滑动窗口；多副本部署需换成 Redis 共享计数（与 pending/checkpointer 同理）。
+LOGIN_RATE_MAX = int(os.getenv("LOGIN_RATE_MAX", "5"))
+LOGIN_RATE_WINDOW = int(os.getenv("LOGIN_RATE_WINDOW", "60"))

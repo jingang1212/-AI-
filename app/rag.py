@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import sys
 from io import BytesIO
 from pathlib import PurePosixPath
@@ -55,15 +56,29 @@ def parse(filename: str, content: bytes) -> str:
         if not text:
             raise ValueError("该 Word 文档没有可索引文本")
         return text
-    # md / txt 等按 UTF-8 解码；编码不对直接报错，不做 GBK 猜测兜底
+    # md / txt 等按 UTF-8 解码；失败时按方案 §4.1 尝试 GBK 严格解码，
+    # 两种都失败才报错——严格解码，绝不静默丢字符。
     try:
         return content.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        pass
+    try:
+        return content.decode("gbk").strip()
     except UnicodeDecodeError as exc:
-        raise ValueError("文档不是 UTF-8 编码：请先转换为 UTF-8 后重新上传") from exc
+        raise ValueError("文档既不是 UTF-8 也不是 GBK 编码，请转换编码后重新上传") from exc
 
 
-def chunk(text: str, strategy: str = "fixed", size: int = config.CHUNK_SIZE, overlap: int = config.CHUNK_OVERLAP) -> list[str]:
-    """4 种分块策略：fixed / markdown-heading / paragraph / sentence。"""
+def chunk(
+    text: str,
+    strategy: str = "fixed",
+    size: int = config.CHUNK_SIZE,
+    overlap: int = config.CHUNK_OVERLAP,
+) -> list[dict[str, Any]]:
+    """4 种分块策略，返回 [{"text", "start", "end", "heading_path"}]。
+
+    与方案 §4.2 对齐：每个 chunk 都带原文字符区间 start/end 与标题路径
+    heading_path（仅 markdown-heading 策略有值），用于检索结果的引用定位。
+    """
     text = text.strip()
     if not text:
         return []
@@ -74,16 +89,29 @@ def chunk(text: str, strategy: str = "fixed", size: int = config.CHUNK_SIZE, ove
             strip_headers=False,
         )
         docs = splitter.split_text(text)
-        return [d.page_content.strip() for d in docs if d.page_content.strip()]
+        out: list[dict[str, Any]] = []
+        search_from = 0
+        for d in docs:
+            # 分隔符规范成 "  \n"（Markdown 硬换行）会影响原文回读，统一换成普通换行
+            piece = d.page_content.replace("  \n", "\n").strip()
+            if not piece:
+                continue
+            # MarkdownHeaderTextSplitter 会把换行规范成 "  \n"，整段未必是原文子串；
+            # 按行定位（行内容不变，仅分隔符可能变化）得到字符区间
+            start, end = _locate_by_lines(text, piece, search_from)
+            # MarkdownHeaderTextSplitter 会维护父级标题：metadata 里带该块所在的 h1/h2/h3
+            path = " / ".join(
+                d.metadata.get(f"h{i}") for i in (1, 2, 3) if d.metadata.get(f"h{i}")
+            )
+            out.append({"text": piece, "start": start, "end": end, "heading_path": path})
+            search_from = max(0, end)
+        return out
 
     if strategy == "paragraph":
-        paras = [p.strip() for p in text.replace("\r\n", "\n").split("\n\n") if p.strip()]
-        return _merge(paras, size)
+        return [{"heading_path": "", **u} for u in _merge_units(_split_paragraphs(text), size)]
 
     if strategy == "sentence":
-        import re
-        sents = [s.strip() for s in re.split(r"(?<=[。！？])", text) if s.strip()]
-        return _merge(sents, size)
+        return [{"heading_path": "", **u} for u in _merge_units(_split_sentences(text), size)]
 
     # 默认 fixed：递归字符切分
     splitter = RecursiveCharacterTextSplitter(
@@ -91,22 +119,175 @@ def chunk(text: str, strategy: str = "fixed", size: int = config.CHUNK_SIZE, ove
         chunk_overlap=overlap,
         separators=["\n\n", "\n", "。", " ", ""],
     )
-    return splitter.split_text(text)
+    pieces = splitter.split_text(text)
+    out = []
+    search_from = 0
+    for piece in pieces:
+        start, end = _locate(text, piece, search_from)
+        out.append({"text": piece, "start": start, "end": end, "heading_path": ""})
+        search_from = max(0, end - overlap)
+    return out
 
 
-def _merge(units: list[str], size: int) -> list[str]:
-    """把单元按 size 聚合成块，装不下就新开一块。"""
-    chunks, buf = [], ""
-    for u in units:
-        cand = f"{buf}\n{u}" if buf else u
-        if buf and len(cand) > size:
-            chunks.append(buf)
-            buf = u
+def _locate(text: str, piece: str, start_hint: int = 0) -> tuple[int, int]:
+    """在原文中顺序定位片段，返回 (start, end)。找不到先退全文字搜索，仍找不到抛错。"""
+    idx = text.find(piece, start_hint)
+    if idx < 0:
+        idx = text.find(piece)
+    if idx < 0:
+        raise ValueError("无法在原文中定位分块片段：分块结果与原文不一致")
+    return idx, idx + len(piece)
+
+
+def _locate_by_lines(text: str, piece: str, start_hint: int = 0) -> tuple[int, int]:
+    """按行定位（分隔符可能被规范化）：首行精确匹配，后续行顺序扩展。"""
+    lines = [ln.strip() for ln in piece.split("\n") if ln.strip()]
+    if not lines:
+        return start_hint, start_hint
+    start = text.find(lines[0], start_hint)
+    if start < 0:
+        # 重叠切分时下一块可能早于上一块终点，退回全文字搜索
+        start = text.find(lines[0])
+    if start < 0:
+        raise ValueError("无法在原文中定位分块片段：分块结果与原文不一致")
+    end = start + len(lines[0])
+    cursor = end
+    for line in lines[1:]:
+        pos = text.find(line, cursor)
+        if pos < 0:
+            break
+        end = pos + len(line)
+        cursor = end
+    return start, end
+
+
+def _split_paragraphs(text: str) -> list[tuple[str, int, int]]:
+    """按空行分段，返回 (段落文本, start, end) 字符区间。"""
+    norm = text.replace("\r\n", "\n")
+    units: list[tuple[str, int, int]] = []
+    for m in re.finditer(r"(?s)(.*?)(?:\n\s*\n|$)", norm):
+        raw = m.group(1)
+        piece = raw.strip()
+        if not piece:
+            continue
+        start = norm.find(piece, m.start())
+        if start < 0 or start >= m.end():
+            start = m.start() + len(raw) - len(raw.lstrip())
+        units.append((piece, start, start + len(piece)))
+    return units
+
+
+def _split_sentences(text: str) -> list[tuple[str, int, int]]:
+    """按句子边界（。！？）切分，返回 (句子文本, start, end)。"""
+    norm = text.replace("\r\n", "\n")
+    units: list[tuple[str, int, int]] = []
+    for m in re.finditer(r"[^。！？\n]*[。！？]|[^。！？\n]+", norm):
+        piece = m.group(0).strip()
+        if piece:
+            units.append((piece, m.start(), m.end()))
+    return units
+
+
+def _merge_units(units: list[tuple[str, int, int]], size: int) -> list[dict[str, Any]]:
+    """把带区间的单元按 size 聚合成块，装不下就新开一块；区间取首尾。"""
+    chunks: list[dict[str, Any]] = []
+    parts: list[str] = []
+    buf_len = 0
+    buf_start = 0
+    buf_end = 0
+    for piece, start, end in units:
+        cand_len = len(piece) if not parts else buf_len + 1 + len(piece)
+        if parts and cand_len > size:
+            chunks.append({"text": "\n".join(parts), "start": buf_start, "end": buf_end})
+            parts, buf_len = [piece], len(piece)
+            buf_start, buf_end = start, end
         else:
-            buf = cand
-    if buf:
-        chunks.append(buf)
+            if not parts:
+                buf_start = start
+            parts.append(piece)
+            buf_len = cand_len
+            buf_end = end
+    if parts:
+        chunks.append({"text": "\n".join(parts), "start": buf_start, "end": buf_end})
     return chunks
+
+
+def pick_strategy(filename: str, strategy: str | None = None) -> str:
+    """未显式指定策略时按文件类型选择：md 用标题分块（带 heading_path），其余固定长度。"""
+    if strategy:
+        return strategy
+    suffix = PurePosixPath(filename).suffix.lower()
+    return "markdown-heading" if suffix == ".md" else "fixed"
+
+
+def _split_parents(text: str, strategy: str) -> list[dict[str, Any]]:
+    """父块（给模型的上下文单元）：md 按一级标题分节，其余按固定长度。"""
+    if strategy == "markdown-heading":
+        splitter = MarkdownHeaderTextSplitter(
+            headers_to_split_on=[("#", "h1")],
+            strip_headers=False,
+        )
+        parents: list[dict[str, Any]] = []
+        for d in splitter.split_text(text):
+            piece = d.page_content.replace("  \n", "\n").strip()
+            if not piece:
+                continue
+            heading = d.metadata.get("h1", "")
+            if len(piece) > config.PARENT_CHUNK_SIZE:
+                # 超长一级节再按固定长度切，继承同一标题路径
+                sub_splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=config.PARENT_CHUNK_SIZE,
+                    chunk_overlap=config.CHUNK_OVERLAP,
+                    separators=["\n\n", "\n", "。", " ", ""],
+                )
+                parents.extend(
+                    {"text": s, "heading_path": heading} for s in sub_splitter.split_text(piece)
+                )
+            else:
+                parents.append({"text": piece, "heading_path": heading})
+        return parents
+    # fixed / paragraph / sentence：沿用 chunk() 作为父块
+    return [
+        {"text": c["text"], "heading_path": c["heading_path"]}
+        for c in chunk(text, strategy=strategy)
+    ]
+
+
+def split_parent_child(text: str, strategy: str = "fixed") -> list[dict[str, Any]]:
+    """父子拆分（small-to-big）：父块提供上下文，子块做索引。
+
+    返回子块列表，每个子块带：
+    - parent_id / parent_text：所属父块（检索命中后把父块全文喂给模型）；
+    - start / end：子块在原文中的字符区间；
+    - heading_path：继承父块标题路径。
+    """
+    parents = _split_parents(text, strategy)
+    child_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=config.CHILD_CHUNK_SIZE,
+        chunk_overlap=config.CHILD_CHUNK_OVERLAP,
+        separators=["\n\n", "\n", "。", " ", ""],
+    )
+    out: list[dict[str, Any]] = []
+    search_from = 0
+    for pi, parent in enumerate(parents):
+        ptext = parent["text"]
+        pstart, pend = _locate_by_lines(text, ptext, search_from)
+        search_from = max(0, pend - config.CHILD_CHUNK_OVERLAP)
+        children = child_splitter.split_text(ptext) or [ptext]
+        for ci, child_text in enumerate(children):
+            cstart = ptext.find(child_text)
+            abs_start = pstart + cstart if cstart >= 0 else pstart
+            out.append(
+                {
+                    "parent_id": f"{pi}",
+                    "parent_text": ptext,
+                    "text": child_text,
+                    "start": abs_start,
+                    "end": abs_start + len(child_text),
+                    "heading_path": parent["heading_path"],
+                }
+            )
+    return out
 
 
 def index_document(filename: str, content: bytes, strategy: str = "fixed", kb_id: str = "kb_general") -> dict:
@@ -117,8 +298,8 @@ def index_document(filename: str, content: bytes, strategy: str = "fixed", kb_id
     这类字段必须入库时就设计好，事后补要全量重灌。
     """
     text = parse(filename, content)
-    chunks = chunk(text, strategy=strategy)
-    if not chunks:
+    units = split_parent_child(text, strategy=strategy)
+    if not units:
         raise ValueError("文档没有可索引文本")
     doc_id = "doc_" + hashlib.md5(filename.encode()).hexdigest()[:12]
     # 覆盖语义：同名文档的旧 chunk 先清掉，避免改版后残留旧片段
@@ -127,19 +308,27 @@ def index_document(filename: str, content: bytes, strategy: str = "fixed", kb_id
     vectorstore.add_chunks(
         [
             {
-                "text": c,
+                "text": u["text"],
                 "metadata": {
                     "document_id": doc_id,
                     "source": filename,
                     "chunk_index": i,
+                    "parent_id": f"{doc_id}:{u['parent_id']}",
+                    "parent_text": u["parent_text"],
                     "strategy": strategy,
                     "kb_id": kb_id,
+                    # 租户隔离预留字段：目前知识库全局共享，统一写 default；
+                    # 多租户场景下按租户写入，检索时用 tenant_id 过滤（方案 §3.2）。
+                    "tenant_id": "default",
+                    "heading_path": u.get("heading_path", ""),
+                    "start": u.get("start", 0),
+                    "end": u.get("end", 0),
                 },
             }
-            for i, c in enumerate(chunks)
+            for i, u in enumerate(units)
         ]
     )
-    return {"document_id": doc_id, "chunk_count": len(chunks)}
+    return {"document_id": doc_id, "chunk_count": len(units)}
 
 
 def search(query: str, top_k: int = config.DEFAULT_TOP_K, kb_id: str | None = None) -> list[dict]:
@@ -151,11 +340,11 @@ def search(query: str, top_k: int = config.DEFAULT_TOP_K, kb_id: str | None = No
     recall_n = top_k * 4
     where = {"kb_id": kb_id} if kb_id else None
 
-    # 1) 向量召回（语义相近：问「限值多少」能命中「排放浓度不得超过…」）
+    # 1) 向量召回（语义相近：问「限值多少」能命中「排放浓度不得超过…」）——索引在子块上
     vec_hits = vectorstore.search(query, top_k=recall_n, where=where)
     vec_map = {h["key"]: h for h in vec_hits}
 
-    # 2) BM25 关键词召回（精确匹配：设备型号、标准号、`frame timeout` 这类词向量容易漏）
+    # 2) BM25 关键词召回（精确匹配：设备型号、标准号、`frame timeout` 这类词向量容易漏）——同样在子块上
     all_chunks, bm25_index = _bm25_index()
     # 需要按 kb_id 过滤时，先多打分再筛（因为索引是全量的，筛掉一部分后数量会变少）
     bm25_limit = recall_n if not kb_id else min(recall_n * 20, len(all_chunks))
@@ -167,20 +356,51 @@ def search(query: str, top_k: int = config.DEFAULT_TOP_K, kb_id: str | None = No
             continue
         key = chunk["key"]
         bm25_keys.append(key)
-        bm25_map[key] = {**chunk, "score": 0.0}
+        meta = chunk["metadata"]
+        bm25_map[key] = {
+            **chunk,
+            "parent_id": meta.get("parent_id"),
+            "parent_text": meta.get("parent_text"),
+            "score": 0.0,
+        }
         if len(bm25_keys) >= recall_n:
             break
 
-    # 3) RRF 融合
-    fused = hybrid.reciprocal_rank_fusion(list(vec_map.keys()), bm25_keys)
+    # 3) 子块 → 父块归并：同一父块只保留通道内最高分的子块（排序取首次出现名次）
+    def parents_of(keyed: dict[str, dict]) -> tuple[list[str], dict[str, dict]]:
+        order: list[str] = []
+        best: dict[str, dict] = {}
+        for key in keyed:
+            h = keyed[key]
+            pid = h.get("parent_id") or key  # 没有父块信息时按子块自身
+            if pid not in best or (h.get("score") or 0) > (best[pid].get("score") or 0):
+                if pid not in best:
+                    order.append(pid)
+                best[pid] = h
+        return order, best
+
+    vec_parent_order, vec_parents = parents_of(vec_map)
+    bm25_parent_order, bm25_parents = parents_of(bm25_map)
+
+    # 4) RRF 在父块维度融合
+    fused = hybrid.reciprocal_rank_fusion(vec_parent_order, bm25_parent_order)
+    all_parents = {**bm25_parents, **vec_parents}  # 向量命中信息更全，后写覆盖
     hits = []
-    for key, rrf_score in fused:
-        item = vec_map.get(key) or bm25_map.get(key)
-        if item:
-            hits.append({**item, "rrf": round(rrf_score, 4)})
+    for pid, rrf_score in fused:
+        item = all_parents.get(pid)
+        if not item:
+            continue
+        hits.append(
+            {
+                **item,
+                # 喂给模型的是父块全文（更大的上下文），引用定位仍来自命中的子块
+                "text": item.get("parent_text") or item.get("text"),
+                "rrf": round(rrf_score, 4),
+            }
+        )
     hits = hits[:recall_n]
 
-    # 4) rerank 精排：优先精排；失败时退回 RRF 顺序，并给出一次可见警告。
+    # 5) rerank 精排：优先精排；失败时退回 RRF 顺序，并给出一次可见警告。
     # rerank 是排序增强器，坏了宁可排序稍差也不要拖垮整个问答；
     # 但降级必须可感知（打印一次原因），不能静默。
     if config.RERANK_MODEL and hits:

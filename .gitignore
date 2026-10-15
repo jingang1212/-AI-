@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 data/reports/
 data/*.log
+data/traces.jsonl
 data/charts/
 data/milvus*.db*
 data/.jwt_secret

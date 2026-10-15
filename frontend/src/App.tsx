@@ -80,7 +80,7 @@ export default function App() {
         addStep('info', `${evt.staff} 完成`, evt.output)
         break
       case 'reference.source':
-        patchAssistant(id, (a) => ({ ...a, refs: [...a.refs, { source: evt.source, score: evt.score }] }))
+        patchAssistant(id, (a) => ({ ...a, refs: [...a.refs, { source: evt.source, score: evt.score, heading: evt.heading }] }))
         break
       case 'image':
         patchAssistant(id, (a) => ({ ...a, media: [...a.media, { id: uid('media'), kind: 'image', url: evt.url, title: evt.title }] }))

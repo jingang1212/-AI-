@@ -10,10 +10,11 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, WebSocket, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, WebSocket, status
 from pydantic import BaseModel
 
 from .. import database
+from ..ratelimit import login_limiter
 from ..scope import visible_company_ids
 from ..security import decode_token, issue_token, verify_password
 
@@ -42,14 +43,21 @@ def _profile(user: dict) -> dict:
 
 
 @router.post("/login")
-def login(body: LoginBody) -> dict:
-    rows = database.query("SELECT * FROM users WHERE username = ?", (body.username.strip(),))
+def login(body: LoginBody, request: Request) -> dict:
+    username = body.username.strip().lower()
+    client_ip = request.client.host if request.client else "unknown"
+    key = (username, client_ip)
+    # 滑动窗口限流：同一「账号+IP」失败次数达到上限即拒绝，防暴力破解
+    if not login_limiter.allow(key):
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="登录尝试次数过多，请稍后再试")
+    rows = database.query("SELECT * FROM users WHERE username = ?", (username,))
     # 用户不存在与密码错误返回同一句话：不暴露「账号是否存在」
     if not rows or not verify_password(body.password, rows[0]["password_hash"]):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
     user = rows[0]
     if not user["enabled"]:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账号已停用")
+    login_limiter.clear(key)
     return {"token": issue_token(user["id"], user["role"]), "user": _profile(user)}
 
 

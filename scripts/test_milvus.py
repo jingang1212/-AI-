@@ -9,6 +9,7 @@
 
 注意：这里直接注入随机向量，绕开 embedding 调用，
 所以账号欠费也能跑——机制和「向量是否真实」是两件事，后者由 ingest 验证。
+本测试使用独立测试集合（knowledge_chunks_test），不会触碰正式知识库。
 """
 
 from __future__ import annotations
@@ -37,19 +38,27 @@ def make_rows(document_id: str, kb_id: str, n: int, offset: int = 0) -> list[dic
             "vector": fake_vector(),
             "content": f"{document_id} 的第 {offset + i} 块，属于 {kb_id}",
             "kb_id": kb_id,
+            "tenant_id": "default",
             "source": f"{document_id}.md",
             "document_id": document_id,
             "chunk_index": offset + i,
             "strategy": "fixed",
+            "heading_path": f"测试标题 {offset + i}" if offset + i == 0 else "",
+            "start_index": offset + i,
+            "end_index": offset + i + 10,
+            "parent_id": f"{document_id}:p{offset + i}",
+            "parent_text": f"{document_id} 的第 {offset + i} 块的父块全文",
         }
         for i in range(n)
     ]
 
 
 def main() -> None:
-    print(f"① 使用 {config.MILVUS_URI}")
-    store = MilvusStore()
-    store.reset()
+    print(f"① 使用 {config.MILVUS_URI}（测试集合 knowledge_chunks_test）")
+    test_collection = config.MILVUS_COLLECTION + "_test"
+    # 旧 schema 的测试集合无法通过体检，先用原始客户端删掉再按新 schema 重建
+    MilvusStore.drop_collection_safe(test_collection)
+    store = MilvusStore(collection=test_collection)
 
     # 写入 docA（kb_a，3 块）与 docB（kb_b，2 块）
     store._insert_rows(make_rows("docA", "kb_a", 3) + make_rows("docB", "kb_b", 2))
@@ -67,7 +76,7 @@ def main() -> None:
     # 检索：kb_a 过滤应只返回 kb_a 的两块
     query_vec = fake_vector()
     hits = store.client.search(
-        collection_name=config.MILVUS_COLLECTION,
+        collection_name=store.collection,
         data=[query_vec],
         limit=10,
         filter=store._expr({"kb_id": "kb_a"}),
@@ -83,7 +92,7 @@ def main() -> None:
     print(f"⑤ 删除 docA 后剩余 {len(left)} 块（预期只剩 docB 的 2 块）")
 
     # 持久化：新建客户端实例，数据仍在
-    reopened = MilvusStore()
+    reopened = MilvusStore(collection=test_collection)
     print(f"⑥ 重建客户端后仍有 {len(reopened.get_all_chunks())} 块（预期 2）")
     reopened.reset()
     print("⑦ 清理测试数据完成")

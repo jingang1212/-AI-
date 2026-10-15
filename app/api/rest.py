@@ -95,7 +95,7 @@ def monitor_data_api(
 @router.post("/docs/upload", response_model=UploadResult, status_code=status.HTTP_201_CREATED)
 def upload_document(
     file: UploadFile = File(...),
-    strategy: str = "fixed",
+    strategy: str | None = None,
     kb_id: str = "kb_general",
     user: dict = Depends(get_current_user),
 ) -> UploadResult:
@@ -112,12 +112,13 @@ def upload_document(
     if not file.filename:
         raise HTTPException(status_code=422, detail="缺少文件名")
     content = file.file.read()
+    effective_strategy = rag.pick_strategy(file.filename, strategy)
     try:
-        result = rag.index_document(file.filename, content, strategy=strategy, kb_id=kb_id)
+        result = rag.index_document(file.filename, content, strategy=effective_strategy, kb_id=kb_id)
     except ValueError as exc:
         # ValueError = 文档内容问题（扫描件、空文本、维度不符），不是服务器故障
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 —— 其它异常（如云端欠费）也翻译成人话
         raise HTTPException(status_code=502, detail=f"入库失败：{exc}") from exc
     trace_event("file", filename=result["document_id"], chunk_count=result["chunk_count"])
-    return UploadResult(filename=file.filename, strategy=strategy, **result)
+    return UploadResult(filename=file.filename, strategy=effective_strategy, **result)

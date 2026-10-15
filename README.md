@@ -81,6 +81,20 @@ python scripts/test_stream.py        # 另开终端：SSE + WebSocket 端到端�
 鉴权：`AUTH_TOKEN`（.env，默认 `demo-token-please-change`，生产必须改）；
 角色用 `X-Role` 头（ops/leader/service），未知角色按最小权限 service 处理。
 
+## 前端聊天页
+
+服务启动后直接打开 http://127.0.0.1:8000/ 即可（单文件页面，零构建）：
+
+- 顶栏切换**身份**（领导/运维/客服）与**传输协议**（SSE / WebSocket）；
+- 流式打字机输出 + Markdown 渲染（表格/代码/列表）+ 工具调用过程折叠展示；
+- 知识库引用来源 chips、趋势图 `<img>` 渲染、报告下载链接；
+- 写操作时弹**人工确认框**，批准/拒绝回执走 `POST /api/chat/confirm`；
+- 按 `Esc` 停止当前回答（SSE 用 AbortController，WebSocket 发 abandon）。
+
+页面实现见 [frontend/index.html](frontend/index.html)（内嵌全部样式与 JS，
+含一个手写的迷你 Markdown 渲染器，避免引第三方库）。
+实测截图：[docs/screenshots/chat-page.png](docs/screenshots/chat-page.png)。
+
 ## 写操作与人工确认（D5）
 
 运维角色可以让 AI 改设备配置（波特率/上报地址/采样周期）。流程：

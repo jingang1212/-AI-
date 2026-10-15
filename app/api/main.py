@@ -51,12 +51,6 @@ app.include_router(rest.router, prefix="/api")
 app.include_router(sse_chat.router)
 app.include_router(ws_chat.router)
 
-# 图表静态目录：draw_trend_chart 生成的 PNG 落在这里，
-# 前端拿到 image 事件里的 /charts/xxx.png 后直接 <img> 引用
-CHARTS_DIR = config.DATA_DIR / "charts"
-CHARTS_DIR.mkdir(parents=True, exist_ok=True)
-app.mount("/charts", StaticFiles(directory=str(CHARTS_DIR)), name="charts")
-
 
 @app.get("/healthz")
 def healthz() -> dict:
@@ -67,3 +61,20 @@ def healthz() -> dict:
         "knowledge_chunks": len(vectorstore.get_all_chunks()),
         "embedding_backend": "dashscope",
     }
+
+
+# 图表静态目录：draw_trend_chart 生成的 PNG 落在这里，
+# 前端拿到 image 事件里的 /charts/xxx.png 后直接 <img> 引用
+CHARTS_DIR = config.DATA_DIR / "charts"
+CHARTS_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/charts", StaticFiles(directory=str(CHARTS_DIR)), name="charts")
+
+# 报告下载目录：generate_report 的产物
+REPORTS_DIR = config.DATA_DIR / "reports"
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/reports", StaticFiles(directory=str(REPORTS_DIR)), name="reports")
+
+# 前端页面：单文件聊天页（SSE/WebSocket 双协议、人工确认弹窗都在里面）。
+# 注意必须最后挂载 "/"：FastAPI 按注册顺序匹配，先注册的路由优先级更高。
+FRONTEND_DIR = config.BASE_DIR / "frontend"
+app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")

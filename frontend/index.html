@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>环保监测智能运维 AI 助手</title>
+<!-- 空 favicon：省掉一次 404 请求，也避免浏览器报 favicon.ico 错误 -->
+<link rel="icon" href="data:,">
+<style>
+  /* ---------- 基础布局 ---------- */
+  :root {
+    --primary: #1677ff;
+    --bg: #f5f7fa;
+    --card: #ffffff;
+    --text: #1f2329;
+    --muted: #86909c;
+    --line: #e5e6eb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+    background: var(--bg); color: var(--text); height: 100vh;
+    display: flex; flex-direction: column;
+  }
+
+  /* ---------- 顶栏 ---------- */
+  header {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 10px 16px; background: var(--card); border-bottom: 1px solid var(--line);
+  }
+  header .brand { font-weight: 700; font-size: 16px; margin-right: 8px; }
+  header select, header input {
+    height: 32px; border: 1px solid var(--line); border-radius: 6px;
+    padding: 0 8px; font-size: 13px; background: #fff;
+  }
+  header input { width: 180px; }
+  header button {
+    height: 32px; padding: 0 14px; border: 1px solid var(--line);
+    border-radius: 6px; background: #fff; cursor: pointer; font-size: 13px;
+  }
+  header button:hover { border-color: var(--primary); color: var(--primary); }
+  #connState { font-size: 12px; color: var(--muted); }
+  #connState.ok { color: #00b42a; }
+  #connState.bad { color: #f53f3f; }
+
+  /* ---------- 消息区 ---------- */
+  main {
+    flex: 1; overflow-y: auto; padding: 20px 16px; max-width: 900px;
+    width: 100%; margin: 0 auto;
+  }
+  #welcome { text-align: center; color: var(--muted); margin-top: 60px; line-height: 2; }
+  #welcome h2 { color: var(--text); font-size: 18px; }
+  .msg { display: flex; margin: 14px 0; gap: 10px; }
+  .msg .avatar {
+    width: 34px; height: 34px; border-radius: 8px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 15px; background: #e8f3ff; color: var(--primary);
+  }
+  .msg.user { flex-direction: row-reverse; }
+  .msg.user .avatar { background: #e6fffb; color: #00b42a; }
+  .bubble {
+    max-width: 78%; background: var(--card); border: 1px solid var(--line);
+    border-radius: 10px; padding: 10px 14px; line-height: 1.7; font-size: 14px;
+    word-break: break-word;
+  }
+  .msg.user .bubble { background: #e8f3ff; border-color: #c9e0ff; }
+  .status { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .content p { margin: 6px 0; }
+  .content table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+  .content th, .content td { border: 1px solid var(--line); padding: 4px 8px; }
+  .content th { background: #f7f8fa; }
+  .content pre {
+    background: #f7f8fa; padding: 10px; border-radius: 6px;
+    overflow-x: auto; font-size: 12px;
+  }
+  .content code { background: #f2f3f5; padding: 1px 5px; border-radius: 4px; }
+  .content pre code { background: none; padding: 0; }
+
+  /* 引用来源 chips */
+  .citations { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .citations span {
+    font-size: 11px; color: var(--primary); background: #e8f3ff;
+    border-radius: 10px; padding: 2px 8px;
+  }
+  /* 图片/报告 */
+  .media img {
+    max-width: 100%; border: 1px solid var(--line); border-radius: 8px; margin-top: 8px;
+  }
+  .media a { color: var(--primary); }
+
+  /* 工具调用过程（可折叠） */
+  details.tools { margin-top: 8px; font-size: 12px; }
+  details.tools summary { cursor: pointer; color: var(--muted); }
+  .tool-list { list-style: none; padding-left: 8px; margin: 6px 0 0; }
+  .tool-list li {
+    border-left: 2px solid var(--line); padding: 3px 8px; margin: 4px 0;
+    color: var(--muted); white-space: pre-wrap; font-family: Consolas, monospace;
+  }
+  .tool-list li.done { border-left-color: #00b42a; }
+
+  /* ---------- 输入区 ---------- */
+  footer {
+    display: flex; gap: 10px; align-items: flex-end;
+    padding: 12px 16px; background: var(--card); border-top: 1px solid var(--line);
+    max-width: 900px; width: 100%; margin: 0 auto;
+  }
+  footer textarea {
+    flex: 1; resize: none; border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 10px; font-size: 14px; font-family: inherit; height: 62px;
+  }
+  footer button {
+    height: 38px; padding: 0 20px; border: none; border-radius: 8px;
+    background: var(--primary); color: #fff; cursor: pointer; font-size: 14px;
+  }
+  footer button:disabled { background: #c9cdd4; cursor: not-allowed; }
+
+  /* ---------- 人工确认弹窗 ---------- */
+  #confirmModal {
+    position: fixed; inset: 0; background: rgba(0,0,0,.35);
+    display: flex; align-items: center; justify-content: center; z-index: 10;
+  }
+  #confirmModal[hidden] { display: none; }
+  .modal-card {
+    background: #fff; border-radius: 12px; padding: 20px 24px; width: 440px;
+    box-shadow: 0 8px 30px rgba(0,0,0,.2);
+  }
+  .modal-card h3 { margin: 0 0 10px; font-size: 16px; }
+  .modal-card .question { line-height: 1.8; margin: 0 0 14px; }
+  .modal-card .old-new {
+    background: #f7f8fa; border-radius: 8px; padding: 10px 12px; font-size: 13px;
+    margin-bottom: 16px; font-family: Consolas, monospace;
+  }
+  .modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+  .modal-actions button {
+    height: 34px; padding: 0 18px; border-radius: 7px; cursor: pointer; border: 1px solid var(--line);
+    background: #fff; font-size: 14px;
+  }
+  .modal-actions .approve { background: var(--primary); border-color: var(--primary); color: #fff; }
+  .modal-actions .reject { color: #f53f3f; }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="brand">🛰️ 环保监测智能运维 AI 助手</span>
+  <select id="role" title="用户身份（决定权限与回答口径）">
+    <option value="ops">安装运维</option>
+    <option value="leader" selected>环保局领导</option>
+    <option value="service">客服</option>
+  </select>
+  <select id="proto" title="传输协议：SSE 给浏览器，WebSocket 给小程序">
+    <option value="sse" selected>SSE（浏览器）</option>
+    <option value="ws">WebSocket（小程序同款）</option>
+  </select>
+  <input id="token" type="password" placeholder="访问 token（服务端 AUTH_TOKEN）">
+  <button id="newSession" title="换一个会话 ID，清空当前对话">新会话</button>
+  <span id="connState">检测中…</span>
+</header>
+
+<main id="chat">
+  <div id="welcome">
+    <h2>想问点什么？</h2>
+    运维：CEMS-003 离线了什么原因 / 把 CEMS-001 波特率改成 19200<br>
+    领导：3 号排口最近 24 小时二氧化硫达标吗，画趋势图并出报告<br>
+    客服：企业装监测设备有什么政策要求？
+  </div>
+</main>
+
+<footer>
+  <textarea id="input" placeholder="输入问题，Enter 发送，Shift+Enter 换行"></textarea>
+  <button id="send">发送</button>
+</footer>
+
+<!-- 人工确认弹窗：收到 interrupt 事件时显示 -->
+<div id="confirmModal" hidden>
+  <div class="modal-card">
+    <h3 id="cfTitle">AI 助手请求修改设备配置</h3>
+    <p class="question" id="cfQuestion"></p>
+    <div class="old-new" id="cfProposal"></div>
+    <div class="modal-actions">
+      <button class="reject" id="cfReject">拒绝</button>
+      <button class="approve" id="cfApprove">批准</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ============================================================================
+// 一、基础状态与工具函数
+// ============================================================================
+const $ = (id) => document.getElementById(id);
+const TOKEN_KEY = "ai-helper-token";
+
+// 恢复上次填的 token；服务端默认值直接预填，省得每次手输
+$("token").value = localStorage.getItem(TOKEN_KEY) || "demo-token-please-change";
+$("token").addEventListener("change", () => localStorage.setItem(TOKEN_KEY, $("token").value.trim()));
+
+// 会话 ID：同一个 ID 连续提问，服务端 LangGraph 会用 checkpoint 记住上下文
+let sessionId = (crypto.randomUUID && crypto.randomUUID()) || Date.now().toString(36);
+
+let busy = false;      // 是否正在等模型回答
+let abortCtl = null;   // SSE 的中止控制器
+let ws = null;         // WebSocket 连接
+
+const chatEl = $("chat");
+const scrollDown = () => { chatEl.scrollTop = chatEl.scrollHeight; };
+
+function setBusy(v) {
+  busy = v;
+  $("send").disabled = v;
+  $("input").disabled = v;
+}
+
+// ---------------------------------------------------------------------------
+// 迷你 Markdown 渲染器（只覆盖模型常用的子集，避免引第三方库）
+// 处理顺序很重要：先抽代码块 → 转义 HTML → 行级结构（表格/标题/列表）→ 行内样式
+// ---------------------------------------------------------------------------
+function escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function mdToHtml(src) {
+  const codeBlocks = [];
+  // 1) 先把 ``` 代码块抽成占位符，防止里面的内容被后续规则误伤
+  src = src.replace(/```([\w-]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+    codeBlocks.push(`<pre><code>${escapeHtml(code.trimEnd())}</code></pre>`);
+    return `\u0000CODE${codeBlocks.length - 1}\u0000`;
+  });
+  const esc = escapeHtml(src);
+  const lines = esc.split("\n");
+  const out = [];
+  let i = 0;
+
+  const inline = (t) =>
+    t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+     .replace(/`([^`]+)`/g, "<code>$1</code>")
+     .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // 表格：| 开头的连续行，第二行是 --- 分隔
+    if (line.includes("|") && i + 1 < lines.length && /^\|?[\s:-]+\|[\s|:-]*$/.test(lines[i + 1])) {
+      const rows = [];
+      while (i < lines.length && lines[i].includes("|")) { rows.push(lines[i]); i++; }
+      const cells = (r) => r.split("|").slice(1, -1).map((c) => c.trim());
+      const head = cells(rows[0]).map((c) => `<th>${inline(c)}</th>`).join("");
+      const body = rows.slice(2).map((r) =>
+        `<tr>${cells(r).map((c) => `<td>${inline(c)}</td>`).join("")}</tr>`
+      ).join("");
+      out.push(`<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`);
+      continue;
+    }
+
+    // 标题
+    let m = line.match(/^#{1,3}\s+(.*)$/);
+    if (m) { out.push(`<h${m[0].length - m[0].trimStart().length}>${inline(m[1])}</h${m[0].length - m[0].trimStart().length}>`); i++; continue; }
+
+    // 无序列表（连续 - 开头的行）
+    if (/^\s*[-*]\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
+        items.push(`<li>${inline(lines[i].replace(/^\s*[-*]\s+/, ""))}</li>`); i++;
+      }
+      out.push(`<ul>${items.join("")}</ul>`);
+      continue;
+    }
+    // 有序列表
+    if (/^\s*\d+[.)]\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i])) {
+        items.push(`<li>${inline(lines[i].replace(/^\s*\d+[.)]\s+/, ""))}</li>`); i++;
+      }
+      out.push(`<ol>${items.join("")}</ol>`);
+      continue;
+    }
+
+    // 空行：分段
+    if (line.trim() === "") { out.push("</p><p>"); i++; continue; }
+    out.push(inline(line) + "<br>"); i++;
+  }
+
+  let html = `<p>${out.join("")}</p>`;
+  // 2) 把代码块占位符还原（这一步在转义之后，所以 code 内容不会被二次转义）
+  html = html.replace(/\u0000CODE(\d+)\u0000/g, (_, n) => codeBlocks[+n]);
+  // 清理空段落
+  return html.replace(/<p>\s*<\/p>/g, "");
+}
+
+// ---------------------------------------------------------------------------
+// 二、消息气泡
+// ---------------------------------------------------------------------------
+function addUserBubble(text) {
+  const wrap = document.createElement("div");
+  wrap.className = "msg user";
+  wrap.innerHTML = `<div class="avatar">我</div><div class="bubble">${escapeHtml(text).replace(/\n/g, "<br>")}</div>`;
+  $("welcome")?.remove();
+  chatEl.appendChild(wrap);
+  scrollDown();
+}
+
+// 创建一个「助手气泡 + 流式渲染状态机」。所有事件都往这里灌。
+function addAssistantBubble() {
+  const wrap = document.createElement("div");
+  wrap.className = "msg assistant";
+  wrap.innerHTML = `
+    <div class="avatar">AI</div>
+    <div class="bubble">
+      <div class="status">思考中…</div>
+      <div class="content"></div>
+      <div class="citations"></div>
+      <div class="media"></div>
+      <details class="tools"><summary>工具调用过程</summary><ul class="tool-list"></ul></details>
+    </div>`;
+  chatEl.appendChild(wrap);
+  return {
+    root: wrap,
+    status: wrap.querySelector(".status"),
+    content: wrap.querySelector(".content"),
+    citations: wrap.querySelector(".citations"),
+    media: wrap.querySelector(".media"),
+    toolList: wrap.querySelector(".tool-list"),
+    raw: "",          // 累积的原始文本（流式期间按纯文本显示，避免 Markdown 半成品闪烁）
+    toolStack: [],    // tool.call 入栈、tool.result 出栈配对
+    dispatchLi: null, // 当前「主管派活」条目，员工收工时标记完成
+    finished: false,
+  };
+}
+
+function appendToolCall(bubble, evt) {
+  const li = document.createElement("li");
+  li.textContent = `${evt.staff || "员工"} → ${evt.name}(${JSON.stringify(evt.args || {})}) …`;
+  bubble.toolList.appendChild(li);
+  bubble.toolStack.push(li);
+  scrollDown();
+}
+
+function fillToolResult(bubble, evt) {
+  const li = bubble.toolStack.pop();
+  if (!li) return;
+  const out = String(evt.output || "").slice(0, 300);
+  li.textContent += `\n   返回：${out}${out.length >= 300 ? "…" : ""}`;
+  li.classList.add("done");
+  scrollDown();
+}
+
+// ---------------------------------------------------------------------------
+// 三、统一事件处理（SSE 与 WebSocket 共用一套）
+// ---------------------------------------------------------------------------
+function handleEvent(evt, bubble) {
+  switch (evt.type) {
+    case "dispatch":
+      bubble.status.textContent = `主管调度：${evt.staff || ""} 处理中…`;
+      bubble.dispatchLi = document.createElement("li");
+      bubble.dispatchLi.textContent = `${evt.staff || ""} 开始处理任务`;
+      bubble.toolList.appendChild(bubble.dispatchLi);
+      scrollDown();
+      break;
+    case "staff.end":
+      bubble.status.textContent = `${evt.staff || "员工"} 已完成，主管汇总中…`;
+      if (bubble.dispatchLi) { bubble.dispatchLi.classList.add("done"); bubble.dispatchLi = null; }
+      break;
+    case "tool.call":
+      bubble.status.textContent = `${evt.staff || "员工"} 正在调用 ${evt.name}…`;
+      appendToolCall(bubble, evt);
+      break;
+    case "tool.result":
+      fillToolResult(bubble, evt);
+      break;
+    case "content.delta":
+      // 流式期间用 textContent 直接追加：天然防 XSS，也不会有 Markdown 半成品
+      bubble.raw += evt.delta || "";
+      bubble.content.textContent = bubble.raw;
+      scrollDown();
+      break;
+    case "reference.source": {
+      const chip = document.createElement("span");
+      chip.textContent = `📄 ${evt.source}（相关度 ${evt.score ?? ""}）`;
+      bubble.citations.appendChild(chip);
+      break;
+    }
+    case "image": {
+      const img = document.createElement("img");
+      img.src = evt.url;
+      img.alt = evt.title || "趋势图";
+      bubble.media.appendChild(img);
+      scrollDown();
+      break;
+    }
+    case "file": {
+      const a = document.createElement("a");
+      a.href = evt.url || "#";
+      a.target = "_blank";
+      a.textContent = `📁 下载报告：${evt.filename || evt.title || evt.url}`;
+      bubble.media.appendChild(a);
+      break;
+    }
+    case "interrupt":
+      openConfirm(evt, bubble);
+      break;
+    case "write.applied":
+      bubble.status.textContent = "✅ 修改已生效并写入审计日志";
+      break;
+    case "error":
+      bubble.status.textContent = "⚠️ " + (evt.message || "出错了");
+      bubble.finished = true;
+      break;
+    case "complete":
+      bubble.status.textContent = "";
+      bubble.content.innerHTML = mdToHtml(bubble.raw);
+      bubble.finished = true;
+      break;
+  }
+  scrollDown();
+}
+
+// ---------------------------------------------------------------------------
+// 四、人工确认弹窗（收到 interrupt 事件时弹出，回执走 POST /api/chat/confirm）
+// ---------------------------------------------------------------------------
+function openConfirm(evt, bubble) {
+  bubble.status.textContent = "⏸️ 等待人工确认…";
+  $("cfTitle").textContent = evt.title || "AI 助手请求修改设备配置";
+  $("cfQuestion").textContent = evt.question || "";
+  const p = evt.proposal || {};
+  $("cfProposal").textContent =
+    `参数：${p.param_label || p.param} ｜ 原值：${p.old_value ?? "（未配置）"} → 新值：${p.new_value}`;
+  $("confirmModal").hidden = false;
+
+  const reply = async (approved) => {
+    $("confirmModal").hidden = true;
+    bubble.status.textContent = approved ? "已批准，继续执行…" : "已拒绝，继续…";
+    await fetch(`/api/chat/confirm?token=${encodeURIComponent($("token").value.trim())}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sessionId, approved, comment: "前端确认" }),
+    }).catch(() => null); // 回执失败也不阻塞界面，服务端会按超时拒绝处理
+  };
+  $("cfApprove").onclick = () => reply(true);
+  $("cfReject").onclick = () => reply(false);
+}
+
+// ---------------------------------------------------------------------------
+// 五、SSE / WebSocket 两种传输
+// ---------------------------------------------------------------------------
+async function sseAsk(text) {
+  abortCtl = new AbortController();
+  const resp = await fetch(`/sse/chat?token=${encodeURIComponent($("token").value.trim())}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Role": $("role").value },
+    body: JSON.stringify({ message: text, session_id: sessionId }),
+    signal: abortCtl.signal,
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.detail || `HTTP ${resp.status}`);
+  }
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    // SSE 协议：事件与事件之间用空行分隔
+    let idx;
+    while ((idx = buf.indexOf("\n\n")) >= 0) {
+      const block = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      for (const line of block.split("\n")) {
+        if (line.startsWith("data:")) {
+          handleEvent(JSON.parse(line.slice(5).trim()), bubble);
+        }
+      }
+    }
+  }
+}
+
+function wsAsk(text) {
+  return new Promise((resolve, reject) => {
+    const scheme = location.protocol === "https:" ? "wss" : "ws";
+    ws = new WebSocket(`${scheme}://${location.host}/ws/chat?token=${encodeURIComponent($("token").value.trim())}`);
+    ws.onopen = () => ws.send(JSON.stringify({
+      type: "chat", message: text, session_id: sessionId, role: $("role").value,
+    }));
+    ws.onmessage = (e) => handleEvent(JSON.parse(e.data), bubble);
+    ws.onerror = () => reject(new Error("WebSocket 连接失败"));
+    ws.onclose = () => resolve();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 六、发送入口与健康检查
+// ---------------------------------------------------------------------------
+let bubble = null;
+
+async function send() {
+  const text = $("input").value.trim();
+  if (!text || busy) return;
+  $("input").value = "";
+  addUserBubble(text);
+  bubble = addAssistantBubble();
+  setBusy(true);
+  try {
+    if ($("proto").value === "ws") await wsAsk(text);
+    else await sseAsk(text);
+    // 防呆：流意外中断但没有 complete 事件时，把已收到的内容渲染出来
+    if (!bubble.finished && bubble.raw) bubble.content.innerHTML = mdToHtml(bubble.raw);
+  } catch (err) {
+    bubble.status.textContent = `⚠️ ${err.message}`;
+    if (err.name === "AbortError") bubble.status.textContent = "已停止";
+  } finally {
+    setBusy(false);
+  }
+}
+
+$("send").onclick = send;
+$("input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+
+// 停止：SSE 用 AbortController，WS 先发 abandon 再断开
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && busy) {
+    abortCtl?.abort();
+    if (ws) { ws.send(JSON.stringify({ type: "abandon" })); ws.close(); }
+  }
+});
+
+$("newSession").onclick = () => {
+  sessionId = (crypto.randomUUID && crypto.randomUUID()) || Date.now().toString(36);
+  chatEl.querySelectorAll(".msg").forEach((n) => n.remove());
+  const w = document.createElement("div");
+  w.id = "welcome";
+  w.innerHTML = "<h2>新会话已开始</h2>会话 ID：" + sessionId;
+  chatEl.appendChild(w);
+};
+
+// 健康检查：页面加载时探一次后端
+(async () => {
+  try {
+    const r = await fetch(`/healthz?token=${encodeURIComponent($("token").value.trim())}`);
+    const ok = r.ok;
+    $("connState").textContent = ok ? "● 后端在线" : "● 后端异常";
+    $("connState").className = ok ? "ok" : "bad";
+  } catch {
+    $("connState").textContent = "● 后端不可达";
+    $("connState").className = "bad";
+  }
+})();
+</script>
+</body>
+</html>

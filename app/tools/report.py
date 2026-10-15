@@ -50,7 +50,8 @@ def generate_report(title: str, content: str) -> str:
     header = f"# {title}\n\n> 生成时间：{stamp}（UTC）\n> 生成方式：AI 助手自动生成，数据来源为在线监测数据库\n\n"
     path.write_text(header + content, encoding="utf-8")
 
-    # 推事件给前端：让它渲染一张「报告卡片」而不是一段纯文本
-    trace_event("file", path=str(path), title=title)
+    # 推事件给前端：渲染「报告下载」链接。
+    # 注意只给 URL 和文件名，不给服务器绝对路径（信息泄漏 + 前端也用不上）。
+    trace_event("file", url=f"/reports/{path.name}", filename=path.name, title=title)
     # 只把文件名给模型/用户看：绝对路径是服务端实现细节，暴露出去既没用也有信息泄漏风险。
     return f"报告已生成：{path.name}（可在前端「报告下载」中打开）"

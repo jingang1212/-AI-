@@ -56,6 +56,13 @@ def init_db() -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT, device_id INTEGER,
             action TEXT, detail TEXT, operator TEXT, source TEXT, ts TEXT
         );
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY, username TEXT UNIQUE, password_hash TEXT,
+            name TEXT, role TEXT, enabled INTEGER DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS user_company (
+            id INTEGER PRIMARY KEY, user_id INTEGER, company_id INTEGER
+        );
         """
     )
     conn.commit()

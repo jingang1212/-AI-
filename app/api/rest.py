@@ -11,11 +11,12 @@ from pydantic import BaseModel
 
 from .. import database, rag
 from ..agents.trace import trace_event
+from ..scope import ScopeDenied, require_device, require_station, visible_company_ids
 from ..services import device_service
 from . import pending
-from .auth import check_token
+from .auth import get_current_user
 
-router = APIRouter(dependencies=[Depends(check_token)])
+router = APIRouter(dependencies=[Depends(get_current_user)])
 
 
 class UploadResult(BaseModel):
@@ -45,27 +46,49 @@ async def confirm_decision(body: ConfirmBody) -> dict:
 
 
 @router.get("/devices")
-def list_devices() -> dict:
-    """设备列表（含站点关联），给前端下拉框/设备卡片用。"""
+def list_devices(user: dict = Depends(get_current_user)) -> dict:
+    """设备列表（含站点关联），只返回当前用户可见企业的设备。"""
+    companies = visible_company_ids(user)
+    if not companies:
+        # 未授权范围返回空集，而不是报错：避免用错误码探测数据是否存在
+        return {"ok": True, "count": 0, "devices": []}
+    placeholders = ",".join("?" * len(companies))
     rows = database.query(
-        "SELECT d.id, d.name, d.device_type, s.id AS station_id, s.name AS station_name "
-        "FROM h_cems_device d "
-        "LEFT JOIN h_cems_station_device sd ON sd.device_id = d.id "
-        "LEFT JOIN h_cems_station s ON s.id = sd.station_id "
-        "ORDER BY d.id"
+        f"SELECT d.id, d.name, d.device_type, s.id AS station_id, s.name AS station_name "
+        f"FROM h_cems_device d "
+        f"LEFT JOIN h_cems_station_device sd ON sd.device_id = d.id "
+        f"LEFT JOIN h_cems_station s ON s.id = sd.station_id "
+        f"WHERE s.company_id IN ({placeholders}) ORDER BY d.id",
+        tuple(companies),
     )
     return {"ok": True, "count": len(rows), "devices": rows}
 
 
 @router.get("/devices/{device_id}/status")
-def device_status_api(device_id: str) -> dict:
-    """设备状态：与 AI 助手的 device_status 工具完全同源。"""
-    return device_service.device_status_detail(device_id)
+def device_status_api(device_id: str, user: dict = Depends(get_current_user)) -> dict:
+    """设备状态：与 AI 助手的 device_status 工具完全同源 + 范围校验。"""
+    db_id, err = device_service.resolve_device_id(device_id)
+    if err:
+        raise HTTPException(status_code=404, detail=err)
+    try:
+        db_id = require_device(user, db_id)
+    except ScopeDenied as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return device_service.device_status_detail(str(db_id))
 
 
 @router.get("/monitor/data")
-def monitor_data_api(station_id: int, metric: str = "二氧化硫", hours: int = 24) -> dict:
+def monitor_data_api(
+    station_id: int,
+    metric: str = "二氧化硫",
+    hours: int = 24,
+    user: dict = Depends(get_current_user),
+) -> dict:
     """监测数据：小时聚合 + 原始统计。前端折线图直接用 hourly 字段画。"""
+    try:
+        station_id = require_station(user, station_id)
+    except ScopeDenied as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     return device_service.monitor_series(station_id, metric, hours)
 
 
@@ -74,6 +97,7 @@ def upload_document(
     file: UploadFile = File(...),
     strategy: str = "fixed",
     kb_id: str = "kb_general",
+    user: dict = Depends(get_current_user),
 ) -> UploadResult:
     """上传文档 → 解析 → 分块 → 向量化入库。
 
@@ -83,6 +107,8 @@ def upload_document(
       这对应「宁可报错也不入库空块」的入库原则；
     - 同名文件再次上传 = 覆盖（按文件名 hash 定位旧 chunk 先删后写）。
     """
+    if user["role"] != "ops":
+        raise HTTPException(status_code=403, detail="只有运维账号可以上传资料")
     if not file.filename:
         raise HTTPException(status_code=422, detail="缺少文件名")
     content = file.file.read()

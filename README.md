@@ -76,11 +76,23 @@ python scripts/test_milvus.py        # Milvus 机制测试（离线）：schema/
 
 | 协议 | 入口 | 适用端 | 说明 |
 |---|---|---|---|
-| SSE | `POST /sse/chat` | Web 浏览器 | `?token=` 鉴权，事件格式见 docs/技术方案.md §6 |
-| WebSocket | `/ws/chat?token=` | 微信小程序 | 首条消息 `{"type":"chat","message":"..."}`，可发 `abandon` 打断 |
+| SSE | `POST /sse/chat` | Web 浏览器 | `Authorization: Bearer <JWT>`，事件格式见 docs/技术方案.md §6 |
+| WebSocket | `/ws/chat?token=<JWT>` | 微信小程序 | 首条消息 `{"type":"chat","message":"..."}`，可发 `abandon` 打断 |
 
-鉴权：`AUTH_TOKEN`（.env，默认 `demo-token-please-change`，生产必须改）；
-角色用 `X-Role` 头（ops/leader/service），未知角色按最小权限 service 处理。
+鉴权：JWT（登录接口签发，密钥取 `JWT_SECRET` 环境变量或自动落盘 `data/.jwt_secret`）；
+角色由服务端用户表决定，客户端不可声明。
+
+演示账号（密码统一 `123456`，见 `scripts/seed.py`）：
+
+| 账号 | 角色 | 数据范围 |
+|---|---|---|
+| `leader_01` | 环保局领导（只读） | 全部 3 家企业 |
+| `ops_01` | 安装运维（可写，写前人工确认） | 华能热电 1 家（30 台设备里可见 12 台） |
+| `service_01` | 客服 | 仅知识库，无企业数据 |
+
+租户隔离三层强制：接口层按 user_company 过滤、Agent 工具层对站点/设备做
+范围校验（模型乱传编号会被拦）、写工具额外校验角色与设备归属。
+验证：`python scripts/test_stream.py`（含「ops 越权访问站点 → 403」断言）。
 
 ## 前端聊天页
 

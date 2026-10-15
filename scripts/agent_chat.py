@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.agents.graph import arun  # noqa: E402
+from app.auth_context import set_current_user  # noqa: E402
 from app.console import setup_console  # noqa: E402
 from app.tools import DEFAULT_ROLE, ROLE_PROMPTS  # noqa: E402
 
@@ -45,6 +46,10 @@ async def main() -> None:
     parser.add_argument("--role", default=DEFAULT_ROLE, choices=sorted(ROLE_PROMPTS), help="用户角色")
     parser.add_argument("--session", default="cli-default", help="会话 ID（thread_id），同 ID 连续对话有记忆")
     args = parser.parse_args()
+
+    # 命令行没有登录流程：注入一个「演示用户」，全量数据范围 + 指定角色。
+    # all_access 只存在于 CLI/单测上下文，网络接口永远不会设置它。
+    set_current_user({"id": 0, "name": "命令行演示", "role": args.role, "all_access": True})
 
     print(f"[角色 {args.role} | 会话 {args.session}] 你：{args.question}")
     result = await arun(args.question, thread_id=args.session, role=args.role)

@@ -327,9 +327,15 @@ def _init_backend():
         print(f"✅ 向量后端：Milvus（{config.MILVUS_URI}）", file=sys.stderr)
     except Exception as exc:  # noqa: BLE001
         _backend = NumpyStore()
+        hint = ""
+        if "lock" in str(exc).lower():
+            hint = (
+                "\n   （很可能是另一个进程占着 Milvus Lite 的文件锁——Lite 是单进程嵌入式，"
+                "ingest 前请先停掉正在运行的服务；生产用 Milvus 服务端没有这个限制）"
+            )
         print(
             f"⚠️ Milvus 初始化失败（{type(exc).__name__}: {str(exc)[:120]}），"
-            "降级为本地 numpy 向量库（仅应急，不具备生产能力）",
+            f"降级为本地 numpy 向量库（仅应急，不具备生产能力）{hint}",
             file=sys.stderr,
         )
     return _backend

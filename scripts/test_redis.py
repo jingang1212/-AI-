@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app import config  # noqa: E402
 from app.agents.graph import arun, checkpointer_backend, get_graph  # noqa: E402
 from app.api.pending import RedisPending, get_store  # noqa: E402
+from app.auth_context import set_current_user  # noqa: E402
 from app.console import setup_console  # noqa: E402
 
 setup_console()
@@ -70,6 +71,8 @@ async def main() -> None:
     if not config.REDIS_URL:
         print("未配置 REDIS_URL，跳过（先启动 Redis 并在 .env 里填 REDIS_URL）")
         return
+    # CLI/单测演示上下文：全量范围 + ops 角色
+    set_current_user({"id": 0, "name": "Redis 测试", "role": "ops", "all_access": True})
     await test_checkpointer()
     await test_pending()
 

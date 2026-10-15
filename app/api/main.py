@@ -32,8 +32,11 @@ async def lifespan(_: FastAPI):
         print("⚠️ 未配置 DASHSCOPE_API_KEY：对话和知识库都不可用，请检查 .env", file=sys.stderr)
     if not vectorstore.get_all_chunks():
         print("⚠️ 知识库为空：请先执行 python scripts/ingest.py 导入文档", file=sys.stderr)
-    token_state = "已自定义" if auth.AUTH_TOKEN != "demo-token-please-change" else "仍是默认值，生产必须改"
-    print(f"✅ AI 助手服务已启动（鉴权 token：{token_state}）")
+    from ..security import get_jwt_secret
+
+    secret_from = "环境变量 JWT_SECRET" if config.JWT_SECRET else "自动生成（data/.jwt_secret）"
+    _ = get_jwt_secret()  # 确保密钥文件存在
+    print(f"✅ AI 助手服务已启动（JWT 签名密钥来源：{secret_from}）")
     yield
 
 
@@ -48,6 +51,7 @@ app.add_middleware(
 )
 
 app.include_router(rest.router, prefix="/api")
+app.include_router(auth.router)
 app.include_router(sse_chat.router)
 app.include_router(ws_chat.router)
 

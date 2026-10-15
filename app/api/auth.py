@@ -1,57 +1,107 @@
-"""演示用 Bearer Token 鉴权。
+"""登录、用户档案与鉴权依赖（JWT）。
 
-说明（面试必被问，提前把话说清楚）：
-这是「单一共享 token」的演示方案，token 从 .env 的 AUTH_TOKEN 读取，
-校验用 `secrets.compare_digest`（常数时间比较，防时序侧信道）。
-
-生产环境应该升级为：
-- 用户体系（登录）→ JWT（HS256/RS256），token 里带 user_id / role / 过期时间；
-- 角色不能由请求头传入（那是演示便利），必须从服务端用户信息里查；
-- 这就是本项目里 `X-Role` 只用于 demo 的原因——正式版要去掉它。
+生产级设计要点（面试可直接讲）：
+- 角色不再由客户端声明：登录成功才签发 JWT，role 从用户表读；
+- 每个请求由 get_current_user 解析 Bearer token → 回查数据库，
+  以**库里的当前角色**为准（token 里的 role 只作参考），并校验账号未停用；
+- 数据范围不放进 JWT（范围会变），而是按需查 user_company 关联表；
+- WebSocket 无法带请求头，token 走 ?token= 查询参数（浏览器限制，公认做法）。
 """
 
 from __future__ import annotations
 
-import os
-import secrets
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, WebSocket, status
+from pydantic import BaseModel
 
-from fastapi import Header, HTTPException, Query, WebSocket, status
+from .. import database
+from ..scope import visible_company_ids
+from ..security import decode_token, issue_token, verify_password
 
-from .. import config
-
-# 演示 token：不改默认值就能连，但生产必须改（.env 里配 AUTH_TOKEN）
-AUTH_TOKEN = os.getenv("AUTH_TOKEN", "demo-token-please-change")
-ALLOWED_ROLES = {"ops", "leader", "service"}
+router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
-def check_token(
+class LoginBody(BaseModel):
+    username: str
+    password: str
+
+
+def _profile(user: dict) -> dict:
+    """用户档案：基本信息 + 可见企业（前端据此渲染，也用于展示权限边界）。"""
+    companies = database.query(
+        "SELECT c.id, c.name FROM t_company c "
+        "JOIN user_company uc ON uc.company_id = c.id WHERE uc.user_id = ? ORDER BY c.id",
+        (int(user["id"]),),
+    )
+    return {
+        "id": user["id"],
+        "username": user["username"],
+        "name": user["name"],
+        "role": user["role"],
+        "companies": companies,
+    }
+
+
+@router.post("/login")
+def login(body: LoginBody) -> dict:
+    rows = database.query("SELECT * FROM users WHERE username = ?", (body.username.strip(),))
+    # 用户不存在与密码错误返回同一句话：不暴露「账号是否存在」
+    if not rows or not verify_password(body.password, rows[0]["password_hash"]):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
+    user = rows[0]
+    if not user["enabled"]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账号已停用")
+    return {"token": issue_token(user["id"], user["role"]), "user": _profile(user)}
+
+
+def _load_user(token: str) -> dict:
+    """token → 用户行。任何一步失败都抛 401。"""
+    payload = decode_token(token) if token else None
+    if not payload:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="登录已失效，请重新登录")
+    rows = database.query("SELECT * FROM users WHERE id = ?", (int(payload["sub"]),))
+    if not rows or not rows[0]["enabled"]:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="账号不存在或已停用")
+    return rows[0]
+
+
+def get_current_user(
     authorization: str | None = Header(default=None),
     token: str | None = Query(default=None),
-) -> None:
-    """FastAPI 依赖：校验 Bearer token（也支持 ?token= 查询参数，方便 EventSource 直连）。
-
-    设计要点：
-    - 支持两种传法是因为浏览器的 EventSource 原生没法带 Authorization 头，
-      只能走 query 参数（生产环境改用 fetch + 流式读取，就能带 header 了）；
-    - `secrets.compare_digest` 而不是 `==`：即使长度不同也不会提前退出，
-      避免通过响应时间猜 token（时序攻击）。
-    """
-    supplied = token or (authorization or "").removeprefix("Bearer ").strip()
-    if not supplied or not secrets.compare_digest(supplied, AUTH_TOKEN):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="token 无效")
+) -> dict:
+    """FastAPI 依赖：解析 Bearer token（兼容 ?token=，EventSource 场景）。"""
+    raw = token or (authorization or "").removeprefix("Bearer ").strip()
+    user = _load_user(raw)
+    return {
+        "id": user["id"],
+        "username": user["username"],
+        "name": user["name"],
+        "role": user["role"],
+    }
 
 
-def check_ws_token(websocket: WebSocket) -> bool:
-    """WebSocket 专用校验：连接阶段还没有请求体，token 走 ?token= 查询参数。"""
-    supplied = websocket.query_params.get("token") or ""
-    return secrets.compare_digest(supplied, AUTH_TOKEN)
+def get_ws_user(websocket: WebSocket) -> dict | None:
+    """WebSocket 连接鉴权：token 走查询参数，失败返回 None（调用方负责关闭连接）。"""
+    raw = websocket.query_params.get("token") or ""
+    try:
+        user = _load_user(raw)
+        return {
+            "id": user["id"],
+            "username": user["username"],
+            "name": user["name"],
+            "role": user["role"],
+        }
+    except HTTPException:
+        return None
 
 
-def resolve_role(requested: str | None) -> str:
-    """把客户端声明的角色收敛为合法角色。
+@router.get("/me")
+def me(user: dict = Depends(get_current_user)) -> dict:
+    return _profile(user)
 
-    安全原则：**未知角色按最严格处理（fail-closed）**，落到只有知识检索权限的 service，
-    而不是默认给高权限的 ops。攻击者乱填角色只会拿到更少的能力。
-    """
-    role = (requested or "").strip().lower()
-    return role if role in ALLOWED_ROLES else "service"
+
+__all__ = [
+    "get_current_user",
+    "get_ws_user",
+    "router",
+    "visible_company_ids",
+]

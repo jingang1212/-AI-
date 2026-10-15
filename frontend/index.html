@@ -143,16 +143,19 @@
 
 <header>
   <span class="brand">🛰️ 环保监测智能运维 AI 助手</span>
-  <select id="role" title="用户身份（决定权限与回答口径）">
-    <option value="ops">安装运维</option>
-    <option value="leader" selected>环保局领导</option>
-    <option value="service">客服</option>
-  </select>
+  <div id="loginBar" style="display:flex;gap:6px;align-items:center;">
+    <input id="username" placeholder="用户名（leader_01 / ops_01）" style="width:170px;">
+    <input id="password" type="password" placeholder="密码（123456）">
+    <button id="loginBtn">登录</button>
+  </div>
+  <div id="userBar" hidden style="display:flex;gap:8px;align-items:center;">
+    <span id="userInfo" style="font-size:13px;color:var(--primary);font-weight:600;"></span>
+    <button id="logoutBtn">退出</button>
+  </div>
   <select id="proto" title="传输协议：SSE 给浏览器，WebSocket 给小程序">
     <option value="sse" selected>SSE（浏览器）</option>
     <option value="ws">WebSocket（小程序同款）</option>
   </select>
-  <input id="token" type="password" placeholder="访问 token（服务端 AUTH_TOKEN）">
   <button id="newSession" title="换一个会话 ID，清空当前对话">新会话</button>
   <span id="connState">检测中…</span>
 </header>
@@ -189,11 +192,52 @@
 // 一、基础状态与工具函数
 // ============================================================================
 const $ = (id) => document.getElementById(id);
-const TOKEN_KEY = "ai-helper-token";
+const JWT_KEY = "ai-helper-jwt";
 
-// 恢复上次填的 token；服务端默认值直接预填，省得每次手输
-$("token").value = localStorage.getItem(TOKEN_KEY) || "demo-token-please-change";
-$("token").addEventListener("change", () => localStorage.setItem(TOKEN_KEY, $("token").value.trim()));
+let jwt = localStorage.getItem(JWT_KEY) || "";
+const ROLE_LABELS = { leader: "环保局领导", ops: "安装运维", service: "客服" };
+
+// 请求头：登录后自动带 Bearer JWT
+const authHeaders = () => (jwt ? { Authorization: `Bearer ${jwt}` } : {});
+
+// 登录/退出与用户条切换。角色由服务端决定，页面不提供角色选择。
+function showUser(user) {
+  $("loginBar").hidden = true;
+  $("userBar").hidden = false;
+  $("userInfo").textContent =
+    `${user.name} · ${ROLE_LABELS[user.role] || user.role}` +
+    (user.companies ? ` · 可见企业 ${user.companies.length} 家` : "");
+}
+function showLogin() {
+  $("loginBar").hidden = false;
+  $("userBar").hidden = true;
+}
+
+async function login() {
+  const resp = await fetch("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: $("username").value.trim(), password: $("password").value }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    alert(err.detail || "登录失败");
+    return;
+  }
+  const data = await resp.json();
+  jwt = data.token;
+  localStorage.setItem(JWT_KEY, jwt);
+  showUser(data.user);
+  $("password").value = "";
+}
+function logout() {
+  jwt = "";
+  localStorage.removeItem(JWT_KEY);
+  showLogin();
+}
+$("loginBtn").onclick = login;
+$("logoutBtn").onclick = logout;
+$("password").addEventListener("keydown", (e) => { if (e.key === "Enter") login(); });
 
 // 会话 ID：同一个 ID 连续提问，服务端 LangGraph 会用 checkpoint 记住上下文
 let sessionId = (crypto.randomUUID && crypto.randomUUID()) || Date.now().toString(36);
@@ -429,9 +473,9 @@ function openConfirm(evt, bubble) {
   const reply = async (approved) => {
     $("confirmModal").hidden = true;
     bubble.status.textContent = approved ? "已批准，继续执行…" : "已拒绝，继续…";
-    await fetch(`/api/chat/confirm?token=${encodeURIComponent($("token").value.trim())}`, {
+    await fetch("/api/chat/confirm", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify({ session_id: sessionId, approved, comment: "前端确认" }),
     }).catch(() => null); // 回执失败也不阻塞界面，服务端会按超时拒绝处理
   };
@@ -444,9 +488,9 @@ function openConfirm(evt, bubble) {
 // ---------------------------------------------------------------------------
 async function sseAsk(text) {
   abortCtl = new AbortController();
-  const resp = await fetch(`/sse/chat?token=${encodeURIComponent($("token").value.trim())}`, {
+  const resp = await fetch("/sse/chat", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-Role": $("role").value },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ message: text, session_id: sessionId }),
     signal: abortCtl.signal,
   });
@@ -478,9 +522,9 @@ async function sseAsk(text) {
 function wsAsk(text) {
   return new Promise((resolve, reject) => {
     const scheme = location.protocol === "https:" ? "wss" : "ws";
-    ws = new WebSocket(`${scheme}://${location.host}/ws/chat?token=${encodeURIComponent($("token").value.trim())}`);
+    ws = new WebSocket(`${scheme}://${location.host}/ws/chat?token=${encodeURIComponent(jwt)}`);
     ws.onopen = () => ws.send(JSON.stringify({
-      type: "chat", message: text, session_id: sessionId, role: $("role").value,
+      type: "chat", message: text, session_id: sessionId,
     }));
     ws.onmessage = (e) => handleEvent(JSON.parse(e.data), bubble);
     ws.onerror = () => reject(new Error("WebSocket 连接失败"));
@@ -496,6 +540,10 @@ let bubble = null;
 async function send() {
   const text = $("input").value.trim();
   if (!text || busy) return;
+  if (!jwt) {
+    alert("请先登录（演示账号 leader_01 / ops_01，密码 123456）");
+    return;
+  }
   $("input").value = "";
   addUserBubble(text);
   bubble = addAssistantBubble();
@@ -535,16 +583,24 @@ $("newSession").onclick = () => {
   chatEl.appendChild(w);
 };
 
-// 健康检查：页面加载时探一次后端
+// 页面加载：先探后端健康；若本地存有 JWT，自动恢复登录态（服务端校验有效性）
 (async () => {
   try {
-    const r = await fetch(`/healthz?token=${encodeURIComponent($("token").value.trim())}`);
+    const r = await fetch("/healthz");
     const ok = r.ok;
     $("connState").textContent = ok ? "● 后端在线" : "● 后端异常";
     $("connState").className = ok ? "ok" : "bad";
   } catch {
     $("connState").textContent = "● 后端不可达";
     $("connState").className = "bad";
+  }
+  if (jwt) {
+    const me = await fetch("/api/auth/me", { headers: authHeaders() }).catch(() => null);
+    if (me && me.ok) {
+      showUser(await me.json());
+    } else {
+      logout(); // token 过期/无效：回到登录态
+    }
   }
 })();
 </script>

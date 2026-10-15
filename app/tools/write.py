@@ -22,6 +22,8 @@ from langchain_core.tools import tool
 from langgraph.types import interrupt
 
 from ..agents.trace import trace_event
+from ..auth_context import get_current_user
+from ..scope import ScopeDenied, require_device
 from ..services import config_service, device_service
 
 
@@ -40,6 +42,15 @@ async def update_device_config(device_id: str, param: str, new_value: str) -> st
     db_id, err = device_service.resolve_device_id(device_id)
     if err:
         return err
+    user = get_current_user()
+    if user is None:
+        return "当前会话没有登录用户，写操作被拒绝。"
+    if user["role"] != "ops":
+        return f"当前账号角色（{user['role']}）没有修改设备配置的权限。"
+    try:
+        db_id = require_device(user, db_id)
+    except ScopeDenied as exc:
+        return str(exc)
     try:
         proposal = config_service.build_proposal(db_id, param, new_value)
     except ValueError as exc:

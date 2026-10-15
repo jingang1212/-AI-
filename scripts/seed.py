@@ -24,7 +24,7 @@ def main():
 
     # 清空既有演示数据，保证脚本可重复执行（幂等）。
     # 顺序：从「引用方」往「被引用方」删，避免外键约束报错。
-    for table in ("op_log", "device_config", "alarm", "device_heartbeat", "monitor_data", "h_cems_station_device",
+    for table in ("user_company", "users", "op_log", "device_config", "alarm", "device_heartbeat", "monitor_data", "h_cems_station_device",
                   "h_cems_device", "h_cems_station", "t_company"):
         database.execute(f"DELETE FROM {table}")
 
@@ -114,6 +114,28 @@ def main():
             "INSERT INTO device_config (device_id, param, value, updated_at) VALUES (?, ?, ?, ?)",
             (device_id, param, value, now_dt.strftime(TS_FORMAT)),
         )
+
+    # 演示账号（密码统一 123456，scrypt 哈希）：
+    # leader_01：环保局领导，范围 = 全部 3 家企业（监管方看辖区内全部）
+    # ops_01   ：装机运维，范围 = 华能热电 1 家（服务方只看自己签约的企业）
+    # service_01：客服，无企业范围（角色只允许知识检索）
+    from app.security import hash_password
+
+    users = [
+        (1, "leader_01", "赵环保", "leader", [1, 2, 3]),
+        (2, "ops_01", "钱运维", "ops", [1]),
+        (3, "service_01", "孙客服", "service", []),
+    ]
+    for user_id, username, name, role, company_ids in users:
+        database.execute(
+            "INSERT INTO users (id, username, password_hash, name, role, enabled) VALUES (?, ?, ?, ?, ?, 1)",
+            (user_id, username, hash_password("123456"), name, role),
+        )
+        for company_id in company_ids:
+            database.execute(
+                "INSERT INTO user_company (user_id, company_id) VALUES (?, ?)",
+                (user_id, company_id),
+            )
     print("演示数据已写入")
 
 

@@ -22,6 +22,8 @@ from __future__ import annotations
 
 from langchain_core.tools import tool
 
+from ..auth_context import get_current_user
+from ..scope import ScopeDenied, require_device, require_station
 from ..services import device_service
 
 
@@ -37,6 +39,13 @@ def device_status(device_id: str) -> str:
     detail = device_service.device_status_detail(device_id)
     if not detail["ok"]:
         return detail["error"]
+
+    # 数据范围校验（AI 工具层的最后一道闸）：模型可能随手传一个不在
+    # 用户授权范围内的设备编号，必须拦住——不能只靠接口层过滤。
+    try:
+        require_device(get_current_user(), int(detail["device_id"]))
+    except ScopeDenied as exc:
+        return str(exc)
 
     if detail.get("never_heartbeat"):
         return (
@@ -69,6 +78,11 @@ def query_data(station_id: int, metric: str = "二氧化硫", hours: int = 24) -
         metric: 指标名称，例如 二氧化硫；默认 二氧化硫。
         hours: 查询最近多少小时，默认 24，最大 168（7 天）。
     """
+    try:
+        station_id = require_station(get_current_user(), station_id)
+    except ScopeDenied as exc:
+        return str(exc)
+
     series = device_service.monitor_series(station_id, metric, hours)
     if not series["ok"]:
         return series["error"]

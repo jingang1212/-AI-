@@ -37,6 +37,9 @@ TZ_NAME = os.getenv("TZ_NAME", "Asia/Shanghai")
 # 留空 = 本地内存模式（重启丢会话）；配了但连不上会在启动时提示并自动退回内存。
 REDIS_URL = os.getenv("REDIS_URL", "")
 
+# JWT 签名密钥（可空：留空会在 data/.jwt_secret 自动生成并持久化，重启不失效）
+JWT_SECRET = os.getenv("JWT_SECRET", "")
+
 # 向量库（Milvus）：
 #   - 默认嵌入式 Milvus Lite（本地文件，零部署）；数据文件落在 DATA_DIR 下；
 #   - 生产换成服务端地址即可，同一套代码：MILVUS_URI=http://127.0.0.1:19530

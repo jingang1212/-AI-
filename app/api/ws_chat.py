@@ -19,7 +19,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
 from ..agents import graph
 from ..agents.trace import MAX_QUEUE_SIZE
-from .auth import check_ws_token, resolve_role
+from ..auth_context import set_current_user
+from .auth import get_ws_user
 from . import pending
 
 # 人工确认等待时长（同 SSE）
@@ -31,7 +32,8 @@ router = APIRouter()
 @router.websocket("/ws/chat")
 async def ws_chat(websocket: WebSocket) -> None:
     # 连接阶段先鉴权：不合法直接按 4401 关闭，不浪费一次握手后的处理
-    if not check_ws_token(websocket):
+    user = get_ws_user(websocket)
+    if user is None:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
     await websocket.accept()
@@ -50,7 +52,8 @@ async def ws_chat(websocket: WebSocket) -> None:
         await websocket.close(code=status.WS_1003_UNSUPPORTED_DATA)
         return
 
-    role = resolve_role(first.get("role"))
+    # 角色来自服务端用户档案（token），消息里声明的一律忽略
+    role = user["role"]
     session_id = str(first.get("session_id") or "default")
     queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=MAX_QUEUE_SIZE)
     store = pending.get_store()
@@ -59,6 +62,7 @@ async def ws_chat(websocket: WebSocket) -> None:
         # WebSocket 是双向的，但确认回执统一走 REST（与 SSE 共用一条路径，少一套实现）
         return await store.wait_decision(session_id, CONFIRM_TIMEOUT_SECONDS)
 
+    set_current_user(user)
     task = asyncio.create_task(graph.arun(message, session_id, role, queue=queue, decide=decide))
 
     async def sender() -> None:

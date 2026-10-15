@@ -19,6 +19,8 @@ from langchain_core.tools import tool  # noqa: E402
 
 from .. import config  # noqa: E402
 from ..agents.trace import trace_event  # noqa: E402
+from ..auth_context import get_current_user  # noqa: E402
+from ..scope import ScopeDenied, require_station  # noqa: E402
 from ..services import device_service  # noqa: E402
 from ..timeutil import now  # noqa: E402
 
@@ -52,6 +54,11 @@ def draw_trend_chart(station_id: int, metric: str = "二氧化硫", hours: int =
         metric: 指标名称，例如 二氧化硫。
         hours: 最近多少小时，默认 24，最大 168。
     """
+    try:
+        station_id = require_station(get_current_user(), station_id)
+    except ScopeDenied as exc:
+        return str(exc)
+
     series = device_service.monitor_series(station_id, metric, hours)
     if not series["ok"]:
         return series["error"]

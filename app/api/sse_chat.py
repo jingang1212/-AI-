@@ -15,13 +15,14 @@ from __future__ import annotations
 import asyncio
 import json
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ..agents import graph
 from ..agents.trace import MAX_QUEUE_SIZE
-from .auth import check_token, resolve_role
+from ..auth_context import set_current_user
+from .auth import get_current_user
 from . import pending
 
 router = APIRouter()
@@ -35,16 +36,16 @@ CONFIRM_TIMEOUT_SECONDS = 300
 class ChatBody(BaseModel):
     message: str
     session_id: str = "default"
-    role: str = "ops"
 
 
-@router.post("/sse/chat", dependencies=[Depends(check_token)])
+@router.post("/sse/chat")
 async def sse_chat(
     body: ChatBody,
-    x_role: str | None = Header(default=None, alias="X-Role"),
+    user: dict = Depends(get_current_user),
 ) -> StreamingResponse:
     """以 SSE 流式返回 Agent 的执行过程与最终答案。"""
-    role = resolve_role(body.role or x_role)
+    # 角色来自服务端用户档案，不再信任客户端声明
+    role = user["role"]
     queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=MAX_QUEUE_SIZE)
 
     # 业务在后台任务里跑，gen() 只负责「从队列取事件 → 序列化 → yield」。
@@ -55,6 +56,9 @@ async def sse_chat(
         """把确认请求挂起，等前端 POST /api/chat/confirm 来唤醒。"""
         return await store.wait_decision(body.session_id, CONFIRM_TIMEOUT_SECONDS)
 
+    # 把当前用户写入 ContextVar：Agent 工具链内部据此做数据范围校验。
+    # create_task 会浅拷贝上下文，子任务里能读到同一份 user。
+    set_current_user(user)
     task = asyncio.create_task(
         graph.arun(body.message, body.session_id, role, queue=queue, decide=decide)
     )

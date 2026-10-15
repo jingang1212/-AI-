@@ -26,9 +26,26 @@ from app.console import setup_console  # noqa: E402
 setup_console()
 
 BASE = "http://127.0.0.1:8000"
-TOKEN = "demo-token-please-change"
-QUESTION = "CEMS-003 离线了，帮我看看什么原因"
-ROLE = "ops"
+QUESTION = "CEMS-001 这台设备状态怎么样，帮我看看"
+
+# 演示账号（scripts/seed.py 创建，密码统一 123456）
+USERS = {
+    "leader": ("leader_01", "123456"),
+    "ops": ("ops_01", "123456"),
+}
+
+
+async def login(client: httpx.AsyncClient, role_key: str) -> dict:
+    """登录拿 JWT，返回请求头。角色完全由服务端决定，客户端不声明。"""
+    username, password = USERS[role_key]
+    resp = await client.post("/api/auth/login", json={"username": username, "password": password})
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    print(
+        f"[登录] {data['user']['name']}（{data['user']['role']}），"
+        f"可见企业 {len(data['user']['companies'])} 家"
+    )
+    return {"Authorization": f"Bearer {data['token']}"}
 
 
 def show_event(event: dict) -> None:
@@ -47,7 +64,7 @@ def show_event(event: dict) -> None:
         print(f"\n[错误] {event.get('message')}")
 
 
-async def test_sse() -> None:
+async def test_sse(headers: dict) -> None:
     print("===== ① SSE 流式对话 =====")
     # 鉴权失败测试：不带 token 应 401
     async with httpx.AsyncClient(base_url=BASE, timeout=300) as client:
@@ -58,8 +75,7 @@ async def test_sse() -> None:
         async with client.stream(
             "POST",
             "/sse/chat",
-            params={"token": TOKEN},
-            headers={"X-Role": ROLE},
+            headers=headers,
             json={"message": QUESTION, "session_id": "sse-test"},
         ) as resp:
             print(f"连接 → HTTP {resp.status_code}")
@@ -75,13 +91,14 @@ async def test_sse() -> None:
         print(f"\nSSE 累计流式输出 {delta_chars} 字")
 
 
-async def test_ws() -> None:
+async def test_ws(headers: dict) -> None:
     print("\n===== ② WebSocket 对话 =====")
+    jwt_token = headers["Authorization"].removeprefix("Bearer ")
     async with websockets.connect(
-        f"ws://127.0.0.1:8000/ws/chat?token={TOKEN}", max_size=4 * 1024 * 1024
+        f"ws://127.0.0.1:8000/ws/chat?token={jwt_token}", max_size=4 * 1024 * 1024
     ) as ws:
         await ws.send(
-            json.dumps({"type": "chat", "message": QUESTION, "session_id": "ws-test", "role": ROLE})
+            json.dumps({"type": "chat", "message": QUESTION, "session_id": "ws-test"})
         )
         while True:
             event = json.loads(await ws.recv())
@@ -91,15 +108,14 @@ async def test_ws() -> None:
     print("\nWebSocket 测试完成")
 
 
-async def test_chart_flow(client: httpx.AsyncClient) -> None:
+async def test_chart_flow(client: httpx.AsyncClient, headers: dict) -> None:
     """D5 测试：领导角色要趋势图 → 应收到 image 事件 + 可访问的图片 URL。"""
     print("\n===== ③ 折线图生成（leader）=====")
     image_url = None
     async with client.stream(
         "POST",
         "/sse/chat",
-        params={"token": TOKEN},
-        headers={"X-Role": "leader"},
+        headers=headers,
         json={
             "message": "分析 3 号排口最近 24 小时二氧化硫情况，画一张趋势图",
             "session_id": "chart-test",
@@ -115,11 +131,11 @@ async def test_chart_flow(client: httpx.AsyncClient) -> None:
             elif event["type"] in ("complete", "error"):
                 break
     if image_url:
-        r = await client.get(image_url, params={"token": TOKEN})
+        r = await client.get(image_url, headers=headers)
         print(f"[图片] GET {image_url} → HTTP {r.status_code}，大小 {len(r.content)} 字节")
 
 
-async def test_confirm_flow(client: httpx.AsyncClient) -> None:
+async def test_confirm_flow(client: httpx.AsyncClient, headers: dict) -> None:
     """D5 测试：写操作必须人工确认后才执行。"""
     print("\n===== ④ 写操作人工确认（ops）=====")
     # 复位：保证每次都从「19200 → 9600」的真实改动开始
@@ -135,13 +151,19 @@ async def test_confirm_flow(client: httpx.AsyncClient) -> None:
     database.execute(
         "UPDATE device_heartbeat SET ts=? WHERE device_id=1", (now_str(),)
     )
+    # 租户隔离断言：ops_01 只授权了华能热电（company 1）
+    devices = await client.get("/api/devices", headers=headers)
+    print(f"[范围] ops 可见设备数 = {devices.json()['count']}（预期 12，全量 30）")
+    deny = await client.get("/api/monitor/data", params={"station_id": 2}, headers=headers)
+    allow = await client.get("/api/monitor/data", params={"station_id": 1}, headers=headers)
+    print(f"[范围] 站点 2 访问 → {deny.status_code}（预期 403）；站点 1 访问 → {allow.status_code}（预期 200）")
+
     session = "confirm-test"
     interrupted = False
     async with client.stream(
         "POST",
         "/sse/chat",
-        params={"token": TOKEN},
-        headers={"X-Role": "ops"},
+        headers=headers,
         json={
             "message": "调用 update_device_config 工具，把 CEMS-001 的 baud_rate 改成 19200",
             "session_id": session,
@@ -156,7 +178,7 @@ async def test_confirm_flow(client: httpx.AsyncClient) -> None:
                 print(f"[确认] {event.get('question')}")
                 r = await client.post(
                     "/api/chat/confirm",
-                    params={"token": TOKEN},
+                    headers=headers,
                     json={"session_id": session, "approved": True, "comment": "现场已确认"},
                 )
                 print(f"[回执] HTTP {r.status_code} {r.json()}")
@@ -186,17 +208,21 @@ async def test_confirm_flow(client: httpx.AsyncClient) -> None:
 async def main(only: str = "all") -> None:
     client = httpx.AsyncClient(base_url=BASE, timeout=300)
     try:
-        health = await client.get("/healthz", params={"token": TOKEN})
+        health = await client.get("/healthz")
         print(f"健康检查 → HTTP {health.status_code} {health.json()}")
+        leader_headers = await login(client, "leader")
+        ops_headers = await login(client, "ops")
         if only in ("all", "chart"):
-            await test_chart_flow(client)
+            await test_chart_flow(client, leader_headers)
         if only in ("all", "confirm"):
-            await test_confirm_flow(client)
+            await test_confirm_flow(client, ops_headers)
     finally:
         await client.aclose()
-    if only == "all":
-        await test_sse()
-        await test_ws()
+    # SSE/WS 各自创建自己的客户端，登录态用 main 里已换到的 JWT 头
+    if only in ("all", "sse"):
+        await test_sse(ops_headers)
+    if only in ("all", "ws"):
+        await test_ws(ops_headers)
 
 
 if __name__ == "__main__":

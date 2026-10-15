@@ -9,4 +9,5 @@ data/*.log
 data/charts/
 data/milvus*.db*
 data/vectors.json
+data/.jwt_secret
 data/*.db

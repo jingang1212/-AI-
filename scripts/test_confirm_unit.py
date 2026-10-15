@@ -25,6 +25,7 @@ from langgraph.types import Command  # noqa: E402
 
 from app import database  # noqa: E402
 from app.agents.state import AgentState  # noqa: E402
+from app.auth_context import set_current_user  # noqa: E402
 from app.console import setup_console  # noqa: E402
 from app.tools.write import update_device_config  # noqa: E402
 
@@ -56,6 +57,9 @@ def build_graph():
 
 
 async def main() -> None:
+    # 单测没有登录流程：注入演示上下文（全量范围 + ops 角色）。
+    set_current_user({"id": 0, "name": "单测", "role": "ops", "all_access": True})
+
     graph = build_graph()
     empty_input = {"messages": [], "role": "ops", "rounds": 0, "task_calls": []}
 

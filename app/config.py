@@ -27,6 +27,13 @@ RERANK_URL = os.getenv(
 )
 BASE_URL = os.getenv("BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
+# 是否开启「思考模式」。默认关闭，原因（实测踩坑）：
+# qwen3.8-flash 默认开思考，此时传 tool_choice="required" 会直接 400：
+# «The tool_choice parameter does not support being set to required or object in thinking mode»。
+# Agent 场景需要的是「稳定地调对工具」，不是长篇推理，关掉思考还更快更省 token。
+# 需要深度分析时可临时开：ENABLE_THINKING=true
+ENABLE_THINKING = os.getenv("ENABLE_THINKING", "false").strip().lower() in {"1", "true", "yes"}
+
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 100
 DEFAULT_TOP_K = 5

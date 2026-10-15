@@ -42,6 +42,9 @@ async def lifespan(_: FastAPI):
         probe.close()
     if not vectorstore.get_all_chunks():
         print("⚠️ 知识库为空：请先执行 python scripts/ingest.py 导入文档", file=sys.stderr)
+    from ..agents.graph import setup_checkpointer
+
+    await setup_checkpointer()  # 启动即建会话表（SQLite），问题在启动期暴露
     from ..security import get_jwt_secret
 
     secret_from = "环境变量 JWT_SECRET" if config.JWT_SECRET else "自动生成（data/.jwt_secret）"

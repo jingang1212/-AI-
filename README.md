@@ -153,6 +153,7 @@ python scripts/test_milvus.py        # Milvus 机制测试（离线）：schema/
 ## 注意事项
 
 - `.env` 已在 `.gitignore` 中，**不要把 Key 提交到仓库**；
+- 依赖版本由 `uv.lock` 锁定，新环境用 `uv sync` 安装（本机没有 uv 时先 `pip install uv`）；
 - 数据文件（`data/app.db`、`data/vectors.json`、`data/reports/`）同样不入库；
 - 换 embedding 模型必须重新全量入库，并同步修改 `EMBED_DIM`；
 - 云端账户欠费时，接口会返回 `Arrearage`，代码会给出中文提示（详见审查记录）。
@@ -160,7 +161,7 @@ python scripts/test_milvus.py        # Milvus 机制测试（离线）：schema/
 
 ## Redis 的应用位置（两个场景）
 
-`REDIS_URL`（.env）为空 = 全内存模式（重启丢会话）；配置后启用：
+`REDIS_URL`（.env）为空 = SQLite 持久化（`data/checkpoints.db`，单机重启不丢会话）；配置后启用（多副本一致）：
 
 1. **LangGraph checkpointer（会话记忆 / 断点续跑 / 多副本一致）**
    需要 Redis Stack（RedisJSON 模块）：

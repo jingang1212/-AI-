@@ -31,7 +31,6 @@ import time
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
@@ -42,17 +41,21 @@ from .state import AgentState
 from .supervisor import route_after_supervisor, supervisor_node
 from .trace import start_trace, trace_event
 
-_CHECKPOINTER: MemorySaver | None = None
+_CHECKPOINTER = None
 _GRAPH = None
+_checkpointer_setup_done = False
+_setup_lock = asyncio.Lock()
 
 
 def _make_checkpointer():
-    """构造 LangGraph checkpointer：配了 REDIS_URL 就用 Redis，否则用内存。
+    """同步构造 Redis checkpointer（SQLite 需异步初始化，见 setup_checkpointer）。
 
     为什么要有外部 checkpointer？（面试必问，本项目的真实答案）
-    - MemorySaver 存在**进程内存**里：后端一重启，所有会话记忆清零，
-      用户多轮对话聊到一半就「失忆」；水平扩容到多副本时，A 副本的会话
-      在 B 副本上不存在，对话状态互相不一致；
+    - 纯内存（MemorySaver）后端一重启，所有会话记忆清零，用户多轮对话
+      聊到一半就「失忆」；水平扩容到多副本时，A 副本的会话在 B 副本上
+      不存在，对话状态互相不一致；
+    - SQLite（默认，单机）：thread_id → checkpoint 落在 data/checkpoints.db，
+      重启不丢会话，零外部依赖；
     - 换成 Redis 后，thread_id → checkpoint 落在共享存储，任意副本都能续上
       同一个会话，重启也不丢——这就是「断点续跑 + 多副本部署」的基础设施。
 
@@ -60,7 +63,7 @@ def _make_checkpointer():
     会先验证连通性与 RedisJSON 模块，验证不过直接启动失败并报明原因。
     """
     if not config.REDIS_URL:
-        return MemorySaver()
+        raise RuntimeError("SQLite checkpointer 需要异步初始化：请先 await setup_checkpointer()")
 
     from langgraph.checkpoint.redis import AsyncRedisSaver
 
@@ -71,9 +74,33 @@ def _make_checkpointer():
     return AsyncRedisSaver(redis_client=client)
 
 
+async def setup_checkpointer() -> None:
+    """构造并初始化 checkpointer（SQLite 需要异步建连接 + 建表）。幂等，并发安全。"""
+    global _checkpointer_setup_done, _CHECKPOINTER
+    if _checkpointer_setup_done:
+        return
+    async with _setup_lock:
+        if _checkpointer_setup_done:
+            return
+        if _CHECKPOINTER is None:
+            if config.REDIS_URL:
+                _CHECKPOINTER = _make_checkpointer()
+            else:
+                import aiosqlite
+                from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+                config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+                conn = await aiosqlite.connect(str(config.DATA_DIR / "checkpoints.db"))
+                saver = AsyncSqliteSaver(conn)
+                await saver.setup()
+                _CHECKPOINTER = saver
+        get_graph()  # 用构造好的 checkpointer 编译
+        _checkpointer_setup_done = True
+
+
 def checkpointer_backend() -> str:
     """当前 checkpointer 用的什么后端（healthz 展示用）。"""
-    return "redis" if config.REDIS_URL else "memory"
+    return "redis" if config.REDIS_URL else "sqlite"
 
 
 async def staff_node(state: AgentState) -> dict[str, Any]:
@@ -162,6 +189,7 @@ async def arun(
       负责「把确认请求转给前端并等用户决定」。不传则任何 interrupt 都自动拒绝。
     """
     started_at = time.time()
+    await setup_checkpointer()  # 先初始化 checkpointer（SQLite 建连接建表），再编译
     graph = get_graph()
     events = start_trace(queue)  # 开启轨迹收集，工具内部会用 trace_event 往里写
 

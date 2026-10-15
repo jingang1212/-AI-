@@ -7,4 +7,6 @@ data/reports/
 data/chroma_probe/
 data/*.log
 data/charts/
+data/milvus*.db*
+data/vectors.json
 data/*.db

@@ -1,9 +1,12 @@
-"""混合检索：中文分词 + BM25 关键词召回 + RRF 融合。
+"""混合检索：中文分词（jieba）+ BM25 关键词召回 + RRF 融合。
 
-参考运维助手项目（agent_py）retrieval/hybrid.py 的实现：
-- 中文按「单字 + 相邻二元组」切，英文/日志字段按整词；
+- 中文用 jieba（结巴）分词：索引侧 lcut（精确模式），查询侧 cut_for_search
+  （搜索引擎模式，会额外产生长词切分，提高召回）；
+- jieba 不可用时退回「单字 + 二元组」的字符级切分（保底，不推荐）；
 - BM25 用 BM25L（对长文档有长度修正）；
 - RRF 用 1/(k+rank)，k=60，规避向量分与 BM25 分数量纲不同。
+
+jieba 文档：https://github.com/fxsjy/jieba
 """
 
 from __future__ import annotations
@@ -12,14 +15,32 @@ import re
 
 from rank_bm25 import BM25L
 
+try:
+    import jieba
+
+    jieba.setLogLevel(20)  # 关掉 jieba 每次加载词典的日志刷屏
+    _HAS_JIEBA = True
+except ImportError:  # 极少见：依赖没装上时保底走字符级切分
+    jieba = None  # type: ignore[assignment]
+    _HAS_JIEBA = False
+
 RRF_K = 60
 
 # 英文/数字（含 ._-/ 连接的字段）按整词；中文按连续汉字段
 _TOKEN_PATTERN = re.compile(r"[A-Za-z0-9]+(?:[._:/-][A-Za-z0-9]+)*|[\u3400-\u4dbf\u4e00-\u9fff]+")
 
 
-def tokenize(text: str) -> list[str]:
-    """中英混合分词：中文单字+二元组，英文整词。"""
+def tokenize(text: str, for_search: bool = False) -> list[str]:
+    """中文分词：优先 jieba；不可用时退回字符级切分。
+
+    for_search=True 用于查询：cut_for_search 会把「设备离线排查」切成
+    设备/离线/排查/设备离线/离线排查 这类组合，提高和文档词的命中率。
+    """
+    if _HAS_JIEBA:
+        cut = jieba.cut_for_search(text) if for_search else jieba.lcut(text)
+        return [t.strip().lower() for t in cut if t.strip()]
+
+    # ---- 以下为保底实现（jieba 缺失时）----
     tokens: list[str] = []
     for m in _TOKEN_PATTERN.finditer(text):
         value = m.group(0).lower()
@@ -30,13 +51,6 @@ def tokenize(text: str) -> list[str]:
         else:
             tokens.append(value)
     return tokens
-
-
-def bm25_rank(query: str, texts: list[str], limit: int = 20) -> list[tuple[int, float]]:
-    """BM25L 打分，返回 (index, score)，过滤 0 分（与 query 无词重叠）。"""
-    if not texts:
-        return []
-    return rank_with_index(query, build_index(texts), limit=limit)
 
 
 def build_index(texts: list[str]) -> BM25L | None:
@@ -60,7 +74,7 @@ def rank_with_index(query: str, index: BM25L | None, limit: int = 20) -> list[tu
     """用已有索引打分。返回 (语料下标, 分数)，已按分数降序，0 分（无词重叠）被过滤。"""
     if index is None:
         return []
-    scores = index.get_scores(tokenize(query))
+    scores = index.get_scores(tokenize(query, for_search=True))
     ranked = sorted(range(len(scores)), key=lambda i: -scores[i])
     return [(i, float(scores[i])) for i in ranked if scores[i] > 0][:limit]
 

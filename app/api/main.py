@@ -62,6 +62,7 @@ def healthz() -> dict:
         "app": "ai-helper",
         "knowledge_chunks": len(vectorstore.get_all_chunks()),
         "embedding_backend": "dashscope",
+        "vector_backend": vectorstore.backend_name(),
         "checkpointer": checkpointer_backend(),
     }
 

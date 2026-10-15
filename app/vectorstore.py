@@ -1,24 +1,21 @@
-"""向量库封装：一个接口，两种后端（本地 numpy / Milvus）。
+"""向量库：Milvus 为主（官方 SDK，嵌入式/服务端同一套代码），numpy 仅作应急兜底。
 
-为什么不是 Chroma？
-实测（Windows + chromadb 1.x 的 Rust 引擎）：连最基本的一次 upsert 都会触发
-原生层 access violation，Python 进程直接崩，异常都抓不到。
-定位过程：用 `python -X faulthandler scripts/ingest.py` 打出崩溃栈，
-看到崩在 chromadb/api/rust.py 的 _upsert / _delete。
-→ 结论：本地开发环境不引入不可控的原生依赖，把向量库抽象成接口，
-   本地用 numpy 实现（几十万字以内完全够用），生产切 Milvus。
+后端选择（按优先级）：
+1. MILVUS_URI 未配置 → 默认使用 Milvus Lite（本仓库 data/ 下的嵌入式文件）；
+2. MILVUS_URI=http://host:19530 → 连接 Milvus 服务端（生产形态，无需改代码）；
+3. Milvus 初始化失败（缺依赖/环境）→ 降级 NumpyStore 并打印警告——
+   这只是一个「不让服务崩」的应急开关，不是推荐路径。
 
-这一层的价值（也是面试可以讲的架构点）：
-    rag.py / tools 只调用 add_chunks / search / get_all_chunks 三个函数，
-    换向量库只改本文件，业务代码零改动。
+Milvus 侧的关键设计（对应 docs/技术方案.md §3.2 / §4.4）：
+- 显式 schema：字符串主键 chunk_id + 1024 维 FLOAT_VECTOR + 标量字段；
+- HNSW 索引（M=16, efConstruction=200）+ COSINE 度量，检索 ef=64；
+- kb_id / document_id 建 INVERTED 索引：标量过滤走索引而不是全表扫描；
+- tenant/kb 隔离用 `filter` 表达式在打分前过滤。
 
-Milvus 版本的核心写法（生产用，见文末注释）：
-    client = MilvusClient(uri=..., token=...)
-    client.search(collection_name="knowledge_chunks", data=[vec],
-                  anns_field="vector", limit=top_k,
-                  search_params={"metric_type": "COSINE", "params": {"ef": 64}},
-                  filter='kb_id == "kb_general"', output_fields=["content", "source"])
-    其中 filter 就是「标量过滤」，生产上用来做租户/知识库隔离，必须一开始就设计进来。
+官方文档：
+- MilvusClient：https://milvus.io/docs/using_milvusclient.md
+- 标量过滤：https://milvus.io/docs/filtered-search.md
+- Milvus Lite：https://milvus.io/docs/milvus_lite.md
 """
 
 from __future__ import annotations
@@ -26,6 +23,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import sys
 from typing import Any
 
 import numpy as np
@@ -33,193 +31,330 @@ import numpy as np
 from . import config
 from .embeddings import embed_query, embed_texts
 
-# 向量数据落盘文件。几十万字 ≈ 几千个 chunk，几 MB JSON，读取完全无压力；
-# 数据量再大（10 万 chunk 以上）就该换 Milvus，不要在这里做工程化硬扛。
-VECTORS_PATH = config.DATA_DIR / "vectors.json"
-
-_DATA: dict[str, dict[str, Any]] | None = None
-
-# 语料版本号：每次写入/删除自增。
-# 上层（rag 的 BM25 索引缓存）用它判断「语料变了没有」，
-# 没变就直接复用内存里的索引，避免每次提问都重建。
-_VERSION = 0
-
-
-def version() -> int:
-    return _VERSION
-
-
-def _load() -> dict[str, dict[str, Any]]:
-    """惰性加载向量库到内存（进程内单例）。"""
-    global _DATA
-    if _DATA is None:
-        if VECTORS_PATH.exists():
-            _DATA = json.loads(VECTORS_PATH.read_text(encoding="utf-8"))
-        else:
-            _DATA = {}
-    return _DATA
-
-
-def _save() -> None:
-    """原子落盘：先写临时文件再 replace，避免写到一半中断导致数据文件损坏。
-
-    这是「用本地文件当数据库」最容易忽略的细节：
-    直接覆盖写，一旦中断，整个知识库就废了。
-    """
-    VECTORS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = VECTORS_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(_load(), ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, VECTORS_PATH)  # os.replace 在 Windows 上也是原子覆盖
-    global _VERSION
-    _VERSION += 1
+# ---------------------------------------------------------------------------
+# 通用工具
+# ---------------------------------------------------------------------------
 
 
 def _normalize(vector: list[float]) -> list[float]:
-    """把向量归一化成长度为 1 的单位向量。
-
-    归一化后余弦相似度就等于点积：检索时少算一次除法，
-    而且分数固定在 0~1，前端展示「相关度 0.86」很直观。
-    """
+    """L2 归一化：归一化后点积 = 余弦相似度，分数固定 0~1。"""
     norm = math.sqrt(sum(v * v for v in vector)) or 1.0
     return [v / norm for v in vector]
 
 
-def add_chunks(chunks: list[dict]) -> None:
-    """写入/覆盖 chunks。
+# ---------------------------------------------------------------------------
+# Milvus 后端
+# ---------------------------------------------------------------------------
 
-    chunks: [{"text": str, "metadata": {...}}]
-    主键 = f"{document_id}:{chunk_index}"，**同一个 id 再写就是覆盖**：
-    这就是「改了文档重新导入是覆盖还是新增」的答案——覆盖，不会产生重复数据。
-    """
-    if not chunks:
-        return
-    vectors = embed_texts([c["text"] for c in chunks])  # 一次批量请求，比逐条快得多
 
-    # 维度自检：换 embedding 模型时最容易在这里翻车（Milvus 里会直接建表失败）
-    dim = len(vectors[0])
-    if dim != config.EMBED_DIM:
-        raise ValueError(
-            f"向量维度 {dim} 与配置 EMBED_DIM={config.EMBED_DIM} 不一致，"
-            "请确认 EMBED_MODEL 与 collection 定义是否配套"
+class MilvusStore:
+    """Milvus 实现：嵌入式（Lite）与服务端共用一套 API。"""
+
+    def __init__(self) -> None:
+        from pymilvus import MilvusClient
+
+        # Lite：uri 传本地文件路径；服务端：传 http(s) 地址。token 用于托管版鉴权。
+        self.client = MilvusClient(uri=config.MILVUS_URI, token=config.MILVUS_TOKEN or None)
+        self._ensure_collection()
+
+    # ---- 建表 ---------------------------------------------------------------
+
+    def _ensure_collection(self) -> None:
+        from pymilvus import DataType
+
+        if not self.client.has_collection(config.MILVUS_COLLECTION):
+            # 显式 schema。两个实测坑（写进审查记录）：
+            # 1) MilvusClient 的快速建表（dimension=...）默认把主键推断成 INT64，
+            #    传字符串主键会报 DataNotMatchException；
+            # 2) enable_dynamic_field=False 时，insert 必须带上 schema 声明的每个字段，
+            #    少一个都会报 "Insert missed an field"。
+            schema = self.client.create_schema(auto_id=False, enable_dynamic_field=False)
+            schema.add_field("chunk_id", DataType.VARCHAR, is_primary=True, max_length=128)
+            schema.add_field("vector", DataType.FLOAT_VECTOR, dim=config.EMBED_DIM)
+            schema.add_field("content", DataType.VARCHAR, max_length=65535)
+            schema.add_field("kb_id", DataType.VARCHAR, max_length=64)
+            schema.add_field("source", DataType.VARCHAR, max_length=256)
+            schema.add_field("document_id", DataType.VARCHAR, max_length=64)
+            schema.add_field("chunk_index", DataType.INT64)
+            schema.add_field("strategy", DataType.VARCHAR, max_length=32)
+
+            index_params = self.client.prepare_index_params()
+            index_params.add_index(
+                field_name="vector",
+                index_type="HNSW",
+                metric_type="COSINE",
+                params={"M": 16, "efConstruction": 200},
+            )
+            # 标量过滤字段建倒排索引：没有它 filter 会退化成暴力扫描
+            index_params.add_index(field_name="kb_id", index_type="INVERTED")
+            index_params.add_index(field_name="document_id", index_type="INVERTED")
+            self.client.create_collection(
+                collection_name=config.MILVUS_COLLECTION, schema=schema, index_params=index_params
+            )
+            return
+
+        # 已存在的 collection 做维度体检：换 embedding 模型没重建表时，
+        # 错误会以「向量维度不匹配」的诡异形态出现，这里提前拦住。
+        fields = self.client.describe_collection(config.MILVUS_COLLECTION).get("fields", [])
+        for field in fields:
+            if field.get("type") == 101 and str(field.get("params", {}).get("dim")) != str(
+                config.EMBED_DIM
+            ):
+                raise ValueError(
+                    f"Milvus collection 维度 {field.get('params', {}).get('dim')} "
+                    f"与 EMBED_DIM={config.EMBED_DIM} 不一致：换 embedding 模型后必须重建 collection"
+                )
+
+    # ---- 写入 ---------------------------------------------------------------
+
+    def _insert_rows(self, rows: list[dict]) -> None:
+        if not rows:
+            return
+        # upsert：主键相同即覆盖，对应「同名文档重新导入 = 覆盖」语义
+        self.client.upsert(collection_name=config.MILVUS_COLLECTION, data=rows)
+
+    def add_chunks(self, chunks: list[dict]) -> None:
+        """chunks: [{"text", "metadata"}] → 向量化 + upsert。"""
+        if not chunks:
+            return
+        vectors = embed_texts([c["text"] for c in chunks])
+        if len(vectors[0]) != config.EMBED_DIM:
+            raise ValueError(
+                f"向量维度 {len(vectors[0])} 与 EMBED_DIM={config.EMBED_DIM} 不一致，请检查 EMBED_MODEL"
+            )
+        rows = []
+        for chunk, vector in zip(chunks, vectors):
+            meta = chunk["metadata"]
+            rows.append(
+                {
+                    "chunk_id": f"{meta.get('document_id')}:{meta.get('chunk_index')}",
+                    "vector": _normalize(vector),
+                    "content": chunk["text"],
+                    "kb_id": meta.get("kb_id", "kb_general"),
+                    "source": meta.get("source", ""),
+                    "document_id": meta.get("document_id", ""),
+                    "chunk_index": int(meta.get("chunk_index", 0)),
+                    "strategy": meta.get("strategy", ""),
+                }
+            )
+        self._insert_rows(rows)
+
+    def delete_document(self, document_id: str) -> int:
+        """按 document_id 删除全部 chunk（改版重新导入前清旧尾巴）。"""
+        deleted = self.client.delete(
+            collection_name=config.MILVUS_COLLECTION,
+            filter=f'document_id == "{document_id}"',
         )
+        return int(deleted.get("delete_count", 0)) if isinstance(deleted, dict) else 0
 
-    data = _load()
-    for chunk, vector in zip(chunks, vectors):
-        meta = chunk["metadata"]
-        key = f"{meta.get('document_id')}:{meta.get('chunk_index')}"
-        data[key] = {
-            "text": chunk["text"],
-            "metadata": meta,
-            "vector": _normalize(vector),
-        }
-    _save()
+    # ---- 检索 ---------------------------------------------------------------
+
+    @staticmethod
+    def _expr(where: dict | None) -> str | None:
+        if not where:
+            return None
+        # 标量值都是安全字符串（kb_id 等），拼接表达式的注入面仅限字段名，由调用方白名单控制
+        return " and ".join(f'{k} == "{v}"' for k, v in where.items())
+
+    def search(self, query: str, top_k: int = config.DEFAULT_TOP_K, where: dict | None = None) -> list[dict]:
+        """向量检索：embed(query) → Milvus HNSW 检索 + 标量过滤。"""
+        hits = self.client.search(
+            collection_name=config.MILVUS_COLLECTION,
+            data=[_normalize(embed_query(query))],
+            limit=top_k,
+            filter=self._expr(where),
+            search_params={"metric_type": "COSINE", "params": {"ef": 64}},
+            output_fields=["content", "source", "kb_id"],
+        )
+        return [
+            {
+                "key": h["entity"].get("chunk_id", ""),
+                "text": h["entity"].get("content", ""),
+                "source": h["entity"].get("source"),
+                "score": round(float(h["distance"]), 4),  # COSINE 度量下 distance 就是相似度
+            }
+            for h in (hits[0] if hits else [])
+        ]
+
+    def get_all_chunks(self) -> list[dict]:
+        """全量 chunk（供 BM25 建索引）。
+
+        Milvus 单次 query 上限 16384 行，按 offset 分页拿全。
+        语料到几十万字（万级 chunk）没问题；再大就该把关键词检索独立到
+        Elasticsearch / OpenSearch，而不是全量拉回内存（文档里已注明）。
+        """
+        page_size = 5000
+        offset = 0
+        out: list[dict] = []
+        while True:
+            page = self.client.query(
+                collection_name=config.MILVUS_COLLECTION,
+                filter="",
+                output_fields=["chunk_id", "content", "source", "kb_id", "document_id"],
+                limit=page_size,
+                offset=offset,
+            )
+            if not page:
+                break
+            out.extend(
+                {
+                    "key": r.get("chunk_id"),
+                    "text": r.get("content", ""),
+                    "source": r.get("source"),
+                    "metadata": {"kb_id": r.get("kb_id"), "document_id": r.get("document_id")},
+                }
+                for r in page
+            )
+            if len(page) < page_size:
+                break
+            offset += len(page)
+        return out
+
+    def reset(self) -> None:
+        self.client.drop_collection(config.MILVUS_COLLECTION)
+        self._ensure_collection()
+
+
+# ---------------------------------------------------------------------------
+# numpy 应急兜底（不用 Milvus 时的降级路径，非推荐）
+# ---------------------------------------------------------------------------
+
+
+class NumpyStore:
+    """本地 numpy 实现：无任何服务依赖，但缺少索引、并发与标量过滤的工程能力。"""
+
+    def __init__(self) -> None:
+        self.path = config.DATA_DIR / "vectors.json"
+        self._data: dict[str, dict[str, Any]] | None = None
+
+    def _load(self) -> dict[str, dict[str, Any]]:
+        if self._data is None:
+            self._data = (
+                json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {}
+            )
+        return self._data
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self._load(), ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, self.path)
+
+    def add_chunks(self, chunks: list[dict]) -> None:
+        if not chunks:
+            return
+        vectors = embed_texts([c["text"] for c in chunks])
+        data = self._load()
+        for chunk, vector in zip(chunks, vectors):
+            meta = chunk["metadata"]
+            key = f"{meta.get('document_id')}:{meta.get('chunk_index')}"
+            data[key] = {"text": chunk["text"], "metadata": meta, "vector": _normalize(vector)}
+        self._save()
+
+    def delete_document(self, document_id: str) -> int:
+        data = self._load()
+        stale = [k for k, v in data.items() if v["metadata"].get("document_id") == document_id]
+        for k in stale:
+            del data[k]
+        if stale:
+            self._save()
+        return len(stale)
+
+    def search(self, query: str, top_k: int = config.DEFAULT_TOP_K, where: dict | None = None) -> list[dict]:
+        data = self._load()
+        if not data:
+            return []
+        q = np.asarray(_normalize(embed_query(query)), dtype=np.float32)
+        keys, matrix = [], []
+        for key, item in data.items():
+            if where and any(item["metadata"].get(k) != v for k, v in where.items()):
+                continue
+            keys.append(key)
+            matrix.append(item["vector"])
+        if not keys:
+            return []
+        scores = np.asarray(matrix, dtype=np.float32) @ q
+        order = np.argsort(-scores)[:top_k]
+        return [
+            {
+                "key": keys[i],
+                "text": data[keys[i]]["text"],
+                "source": data[keys[i]]["metadata"].get("source"),
+                "score": round(float(scores[i]), 4),
+            }
+            for i in order
+        ]
+
+    def get_all_chunks(self) -> list[dict]:
+        return [
+            {"key": key, "text": item["text"], "source": item["metadata"].get("source"),
+             "metadata": item["metadata"]}
+            for key, item in self._load().items()
+        ]
+
+    def reset(self) -> None:
+        self._data = {}
+        self._save()
+
+
+# ---------------------------------------------------------------------------
+# 后端选择与模块级 API（rag 层只依赖这几个函数）
+# ---------------------------------------------------------------------------
+
+_backend = None
+_version = 0
+
+
+def _bump() -> None:
+    """语料版本号自增：rag 的 BM25 索引缓存靠它判断是否需要重建。"""
+    global _version
+    _version += 1
+
+
+def _init_backend():
+    global _backend
+    if _backend is not None:
+        return _backend
+    try:
+        _backend = MilvusStore()
+        print(f"✅ 向量后端：Milvus（{config.MILVUS_URI}）", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001
+        _backend = NumpyStore()
+        print(
+            f"⚠️ Milvus 初始化失败（{type(exc).__name__}: {str(exc)[:120]}），"
+            "降级为本地 numpy 向量库（仅应急，不具备生产能力）",
+            file=sys.stderr,
+        )
+    return _backend
+
+
+def backend_name() -> str:
+    return type(_init_backend()).__name__.replace("Store", "").lower()
+
+
+def add_chunks(chunks: list[dict]) -> None:
+    _init_backend().add_chunks(chunks)
+    _bump()
 
 
 def delete_document(document_id: str) -> int:
-    """删除某篇文档的全部 chunk，返回删除条数。
-
-    用途：文档改版后 chunk 数量变少时，清掉多余的历史尾巴，
-    否则旧版本残留的片段会继续被检索到（RAG 里很隐蔽的脏数据问题）。
-    """
-    data = _load()
-    stale = [k for k, v in data.items() if v["metadata"].get("document_id") == document_id]
-    for k in stale:
-        del data[k]
-    if stale:
-        _save()
-    return len(stale)
+    n = _init_backend().delete_document(document_id)
+    _bump()
+    return n
 
 
 def search(query: str, top_k: int = config.DEFAULT_TOP_K, where: dict | None = None) -> list[dict]:
-    """向量检索：返回带来源与余弦相似度的命中。
-
-    where 是「标量过滤」的本地实现（例如 {"kb_id": "kb_general"}）。
-    注意过滤要在**打分之前**做（先缩小候选集再算相似度），
-    否则既浪费算力，又可能让不该看到的租户数据进入候选（权限泄漏）。
-    """
-    data = _load()
-    if not data:
-        return []
-
-    q = np.asarray(_normalize(embed_query(query)), dtype=np.float32)
-    keys: list[str] = []
-    matrix: list[list[float]] = []
-    for key, item in data.items():
-        if where and any(item["metadata"].get(k) != v for k, v in where.items()):
-            continue
-        keys.append(key)
-        matrix.append(item["vector"])
-    if not keys:
-        return []
-
-    scores = np.asarray(matrix, dtype=np.float32) @ q  # 归一化后点积 = 余弦相似度
-    order = np.argsort(-scores)[:top_k]
-    return [
-        {
-            "key": keys[i],
-            "text": data[keys[i]]["text"],
-            "source": data[keys[i]]["metadata"].get("source"),
-            "score": round(float(scores[i]), 4),
-        }
-        for i in order
-    ]
+    return _init_backend().search(query, top_k, where)
 
 
 def get_all_chunks() -> list[dict]:
-    """取出全部 chunk（供 BM25 建索引）。
-
-    性能说明：这里是全量扫描，几十万字没问题；
-    上百万 chunk 时应改用独立关键词索引（Elasticsearch / OpenSearch），
-    或只对「向量召回的候选集」做 BM25 重排——面试常问「BM25 怎么扩展」。
-    """
-    return [
-        {
-            "key": key,
-            "text": item["text"],
-            "source": item["metadata"].get("source"),
-            # 带上 metadata：BM25 召回也要能按知识库/租户过滤，
-            # 否则「向量结果过滤了、关键词结果没过滤」会造成越权泄漏。
-            "metadata": item["metadata"],
-        }
-        for key, item in _load().items()
-    ]
+    return _init_backend().get_all_chunks()
 
 
 def reset() -> None:
-    """清空本地向量库（重新全量导入前用）。"""
-    global _DATA
-    _DATA = {}
-    _save()
+    _init_backend().reset()
+    _bump()
 
 
-# ---------------------------------------------------------------------------
-# 生产版（Milvus）参考实现，切换时把上面的函数替换成下面的写法即可：
-#
-# from pymilvus import MilvusClient
-#
-# class MilvusStore:
-#     def __init__(self, uri: str, token: str = ""):
-#         self.client = MilvusClient(uri=uri, token=token)   # 阿里云托管版传 uri + token
-#
-#     def add_chunks(self, chunks):
-#         rows = [{"chunk_id": key, "vector": vec, "content": text, **meta} for ...]
-#         for i in range(0, len(rows), 10):                  # 分批写，单次别太大
-#             self.client.upsert(collection_name="knowledge_chunks", data=rows[i:i+10])
-#
-#     def search(self, query, top_k, where=None):
-#         vec = embed_query(query)
-#         expr = " and ".join(f'{k} == "{v}"' for k, v in (where or {}).items()) or None
-#         hits = self.client.search(
-#             collection_name="knowledge_chunks",
-#             data=[vec],
-#             anns_field="vector",
-#             limit=top_k,
-#             search_params={"metric_type": "COSINE", "params": {"ef": 64}},
-#             filter=expr,                                   # 标量过滤：租户隔离靠它
-#             output_fields=["content", "source"],
-#         )
-#         return [...]
-#
-# 建表要点：dim 必须 = config.EMBED_DIM（1024）；索引用 HNSW(M=16, efConstruction=200)；
-# 标量字段 kb_id / tenant_id 要建 INVERTED 索引，否则 filter 会退化成全表扫描。
-# ---------------------------------------------------------------------------
+def version() -> int:
+    return _version

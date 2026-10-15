@@ -19,7 +19,7 @@ app/
   config.py          # .env 配置（模型名、地址、分块参数、时区）
   llm.py             # 对话模型工厂（OpenAI 兼容模式 + 关闭思考模式）
   embeddings.py      # 向量化（qwen3.7-text-embedding，1024 维）
-  vectorstore.py     # 向量库：本地 numpy 实现；文件末尾附 Milvus 生产写法
+  vectorstore.py     # 向量库：Milvus（默认嵌入式 Lite，服务端同套代码）+ numpy 应急兜底
   hybrid.py          # 中文分词 + BM25L + RRF 融合
   rerank.py          # qwen3.7-text-rerank 精排
   rag.py             # 解析 → 分块 → 入库 → 混合检索
@@ -69,6 +69,7 @@ python scripts/agent_chat.py "分析 3 号排口最近 24 小时二氧化硫并�
 # 7. 启动 HTTP/WS 服务（D4）
 uvicorn app.api.main:app --port 8000
 python scripts/test_stream.py        # 另开终端：SSE + WebSocket 端到端测试
+python scripts/test_milvus.py        # Milvus 机制测试（离线）：schema/过滤/删除/持久化
 ```
 
 流式接口速览：

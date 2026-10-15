@@ -37,6 +37,14 @@ TZ_NAME = os.getenv("TZ_NAME", "Asia/Shanghai")
 # 留空 = 本地内存模式（重启丢会话）；配了但连不上会在启动时提示并自动退回内存。
 REDIS_URL = os.getenv("REDIS_URL", "")
 
+# 向量库（Milvus）：
+#   - 默认嵌入式 Milvus Lite（本地文件，零部署）；数据文件落在 DATA_DIR 下；
+#   - 生产换成服务端地址即可，同一套代码：MILVUS_URI=http://127.0.0.1:19530
+#   - 托管版（Zilliz Cloud）额外填 MILVUS_TOKEN
+MILVUS_URI = os.getenv("MILVUS_URI", str(DATA_DIR / "milvus_lite.db"))
+MILVUS_COLLECTION = os.getenv("MILVUS_COLLECTION", "knowledge_chunks")
+MILVUS_TOKEN = os.getenv("MILVUS_TOKEN", "")
+
 # 是否开启「思考模式」。默认关闭，原因（实测踩坑）：
 # qwen3.8-flash 默认开思考，此时传 tool_choice="required" 会直接 400：
 # «The tool_choice parameter does not support being set to required or object in thinking mode»。

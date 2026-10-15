@@ -15,7 +15,7 @@ from . import config
 def rerank(query: str, documents: list[str], top_n: int = 5) -> list[tuple[int, float]]:
     """
     对候选文档重新打分，返回 [(原下标, 相关度分数)]，按分数降序。
-    失败时抛异常，由调用方降级为 RRF 顺序。
+    失败时抛异常，由调用方处理（不降级为 RRF）。
     """
     if not documents:
         return []

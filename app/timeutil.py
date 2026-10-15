@@ -12,21 +12,22 @@
 跨境/多区域场景再改用 UTC 存储 + 展示层转换。
 
 说明：`zoneinfo` 是 Python 3.9+ 标准库，Windows 上需要 `tzdata` 包提供时区数据库，
-否则会抛 ZoneInfoNotFoundError——所以这里做了降级兜底。
+否则会抛 ZoneInfoNotFoundError——这里不做降级，直接把原因和解决办法报出来。
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from . import config
 
 try:
-    from zoneinfo import ZoneInfo
-
     TZ = ZoneInfo(config.TZ_NAME)
-except Exception:  # noqa: BLE001 —— 缺 tzdata 时退回固定 +08:00，不影响国内项目使用
-    TZ = timezone(timedelta(hours=8))
+except Exception as exc:  # noqa: BLE001
+    raise RuntimeError(
+        f"无法加载时区 {config.TZ_NAME}：Windows 上需要安装 tzdata（pip install tzdata）"
+    ) from exc
 
 # 库内时间格式：秒级、不带时区后缀，方便 MySQL/SQLite 直接比较大小
 TS_FORMAT = "%Y-%m-%d %H:%M:%S"

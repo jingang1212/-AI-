@@ -54,7 +54,11 @@ def trace_event(event_type: str, **payload: Any) -> None:
     state = _TRACE.get()
     if state is None:
         return
-    event: dict[str, Any] = {"type": event_type, "ts": time.time(), **payload}
+    # 事件的 type / ts 是元信息，不允许被 payload 里同名字段覆盖：
+    # 否则 trace_event("interrupt", type="confirm") 会把事件类型悄悄改成 confirm，
+    # 前端按 type 分发时对不上号。其余字段原样透传。
+    event: dict[str, Any] = {"type": event_type, "ts": time.time()}
+    event.update({k: v for k, v in payload.items() if k not in ("type", "ts")})
     state["events"].append(event)
     queue = state.get("queue")
     if queue is not None:

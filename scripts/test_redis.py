@@ -1,6 +1,6 @@
 """Redis 集成测试：checkpointer 持久化 + 人工确认登记表。
 
-前置：本机已启动 Redis（redis-server / docker run -d -p 6379:6379 redis:7），
+前置：本机已启动 Redis Stack（checkpointer 需要 RedisJSON 模块），
 且 .env 里 REDIS_URL 指向它。验证内容：
 
 1. checkpointer 后端 = redis；
@@ -30,9 +30,7 @@ setup_console()
 async def test_checkpointer() -> None:
     backend = checkpointer_backend()
     print(f"① checkpointer 后端：{backend}")
-    if backend == "memory":
-        print("   （当前 Redis 无 RedisJSON 模块，checkpointer 已按设计降级内存；"
-              "换 Redis Stack 后无需改代码自动切回 Redis）")
+    assert backend == "redis", "REDIS_URL 已配置，checkpointer 必须是 redis（不再降级）"
     thread = "redis-persist-test"
     await arun("记住：我叫赵金刚，负责华东片区运维。", thread_id=thread, role="ops")
 

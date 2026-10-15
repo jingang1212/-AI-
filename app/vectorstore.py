@@ -1,10 +1,11 @@
-"""向量库：Milvus 为主（官方 SDK，嵌入式/服务端同一套代码），numpy 仅作应急兜底。
+"""向量库：Milvus（官方 SDK，嵌入式 Lite 与服务端同一套代码）。
 
-后端选择（按优先级）：
+后端选择（按配置）：
 1. MILVUS_URI 未配置 → 默认使用 Milvus Lite（本仓库 data/ 下的嵌入式文件）；
 2. MILVUS_URI=http://host:19530 → 连接 Milvus 服务端（生产形态，无需改代码）；
-3. Milvus 初始化失败（缺依赖/环境）→ 降级 NumpyStore 并打印警告——
-   这只是一个「不让服务崩」的应急开关，不是推荐路径。
+
+Milvus 初始化失败会直接抛异常，不做任何降级——静默降级会掩盖根因，
+让「服务在跑但搜不到数据」这类问题难以排查。
 
 Milvus 侧的关键设计（对应 docs/技术方案.md §3.2 / §4.4）：
 - 显式 schema：字符串主键 chunk_id + 1024 维 FLOAT_VECTOR + 标量字段；
@@ -20,13 +21,8 @@ Milvus 侧的关键设计（对应 docs/技术方案.md §3.2 / §4.4）：
 
 from __future__ import annotations
 
-import json
 import math
-import os
 import sys
-from typing import Any
-
-import numpy as np
 
 from . import config
 from .embeddings import embed_query, embed_texts
@@ -223,93 +219,20 @@ class MilvusStore:
 
 
 # ---------------------------------------------------------------------------
-# numpy 应急兜底（不用 Milvus 时的降级路径，非推荐）
+# 模块级 API（rag 层只依赖这几个函数）
 # ---------------------------------------------------------------------------
 
-
-class NumpyStore:
-    """本地 numpy 实现：无任何服务依赖，但缺少索引、并发与标量过滤的工程能力。"""
-
-    def __init__(self) -> None:
-        self.path = config.DATA_DIR / "vectors.json"
-        self._data: dict[str, dict[str, Any]] | None = None
-
-    def _load(self) -> dict[str, dict[str, Any]]:
-        if self._data is None:
-            self._data = (
-                json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {}
-            )
-        return self._data
-
-    def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._load(), ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, self.path)
-
-    def add_chunks(self, chunks: list[dict]) -> None:
-        if not chunks:
-            return
-        vectors = embed_texts([c["text"] for c in chunks])
-        data = self._load()
-        for chunk, vector in zip(chunks, vectors):
-            meta = chunk["metadata"]
-            key = f"{meta.get('document_id')}:{meta.get('chunk_index')}"
-            data[key] = {"text": chunk["text"], "metadata": meta, "vector": _normalize(vector)}
-        self._save()
-
-    def delete_document(self, document_id: str) -> int:
-        data = self._load()
-        stale = [k for k, v in data.items() if v["metadata"].get("document_id") == document_id]
-        for k in stale:
-            del data[k]
-        if stale:
-            self._save()
-        return len(stale)
-
-    def search(self, query: str, top_k: int = config.DEFAULT_TOP_K, where: dict | None = None) -> list[dict]:
-        data = self._load()
-        if not data:
-            return []
-        q = np.asarray(_normalize(embed_query(query)), dtype=np.float32)
-        keys, matrix = [], []
-        for key, item in data.items():
-            if where and any(item["metadata"].get(k) != v for k, v in where.items()):
-                continue
-            keys.append(key)
-            matrix.append(item["vector"])
-        if not keys:
-            return []
-        scores = np.asarray(matrix, dtype=np.float32) @ q
-        order = np.argsort(-scores)[:top_k]
-        return [
-            {
-                "key": keys[i],
-                "text": data[keys[i]]["text"],
-                "source": data[keys[i]]["metadata"].get("source"),
-                "score": round(float(scores[i]), 4),
-            }
-            for i in order
-        ]
-
-    def get_all_chunks(self) -> list[dict]:
-        return [
-            {"key": key, "text": item["text"], "source": item["metadata"].get("source"),
-             "metadata": item["metadata"]}
-            for key, item in self._load().items()
-        ]
-
-    def reset(self) -> None:
-        self._data = {}
-        self._save()
-
-
-# ---------------------------------------------------------------------------
-# 后端选择与模块级 API（rag 层只依赖这几个函数）
-# ---------------------------------------------------------------------------
-
-_backend = None
+_store: MilvusStore | None = None
 _version = 0
+
+
+def _get_store() -> MilvusStore:
+    """进程内单例。初始化失败直接抛异常，不降级。"""
+    global _store
+    if _store is None:
+        _store = MilvusStore()
+        print(f"✅ 向量后端：Milvus（{config.MILVUS_URI}）", file=sys.stderr)
+    return _store
 
 
 def _bump() -> None:
@@ -318,54 +241,31 @@ def _bump() -> None:
     _version += 1
 
 
-def _init_backend():
-    global _backend
-    if _backend is not None:
-        return _backend
-    try:
-        _backend = MilvusStore()
-        print(f"✅ 向量后端：Milvus（{config.MILVUS_URI}）", file=sys.stderr)
-    except Exception as exc:  # noqa: BLE001
-        _backend = NumpyStore()
-        hint = ""
-        if "lock" in str(exc).lower():
-            hint = (
-                "\n   （很可能是另一个进程占着 Milvus Lite 的文件锁——Lite 是单进程嵌入式，"
-                "ingest 前请先停掉正在运行的服务；生产用 Milvus 服务端没有这个限制）"
-            )
-        print(
-            f"⚠️ Milvus 初始化失败（{type(exc).__name__}: {str(exc)[:120]}），"
-            f"降级为本地 numpy 向量库（仅应急，不具备生产能力）{hint}",
-            file=sys.stderr,
-        )
-    return _backend
-
-
 def backend_name() -> str:
-    return type(_init_backend()).__name__.replace("Store", "").lower()
+    return "milvus"
 
 
 def add_chunks(chunks: list[dict]) -> None:
-    _init_backend().add_chunks(chunks)
+    _get_store().add_chunks(chunks)
     _bump()
 
 
 def delete_document(document_id: str) -> int:
-    n = _init_backend().delete_document(document_id)
+    n = _get_store().delete_document(document_id)
     _bump()
     return n
 
 
 def search(query: str, top_k: int = config.DEFAULT_TOP_K, where: dict | None = None) -> list[dict]:
-    return _init_backend().search(query, top_k, where)
+    return _get_store().search(query, top_k, where)
 
 
 def get_all_chunks() -> list[dict]:
-    return _init_backend().get_all_chunks()
+    return _get_store().get_all_chunks()
 
 
 def reset() -> None:
-    _init_backend().reset()
+    _get_store().reset()
     _bump()
 
 

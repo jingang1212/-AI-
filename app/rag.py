@@ -55,11 +55,11 @@ def parse(filename: str, content: bytes) -> str:
         if not text:
             raise ValueError("该 Word 文档没有可索引文本")
         return text
-    # md / txt 等按 UTF-8 解码
+    # md / txt 等按 UTF-8 解码；编码不对直接报错，不做 GBK 猜测兜底
     try:
         return content.decode("utf-8").strip()
-    except UnicodeDecodeError:
-        return content.decode("gbk", errors="ignore").strip()
+    except UnicodeDecodeError as exc:
+        raise ValueError("文档不是 UTF-8 编码：请先转换为 UTF-8 后重新上传") from exc
 
 
 def chunk(text: str, strategy: str = "fixed", size: int = config.CHUNK_SIZE, overlap: int = config.CHUNK_OVERLAP) -> list[str]:
@@ -180,11 +180,13 @@ def search(query: str, top_k: int = config.DEFAULT_TOP_K, kb_id: str | None = No
             hits.append({**item, "rrf": round(rrf_score, 4)})
     hits = hits[:recall_n]
 
-    # 4) rerank 精排：配置了就用，失败则退回 RRF 顺序（不阻断检索，但会提示一次失败原因）
+    # 4) rerank 精排：优先精排；失败时退回 RRF 顺序，并给出一次可见警告。
+    # rerank 是排序增强器，坏了宁可排序稍差也不要拖垮整个问答；
+    # 但降级必须可感知（打印一次原因），不能静默。
     if config.RERANK_MODEL and hits:
-        try:
-            from . import rerank as rerank_mod
+        from . import rerank as rerank_mod
 
+        try:
             ranked = rerank_mod.rerank(query, [h["text"] for h in hits], top_n=top_k)
             if ranked:
                 hits = [{**hits[i], "rerank": round(score, 4)} for i, score in ranked]
@@ -197,16 +199,11 @@ _RERANK_WARNED = False
 
 
 def _warn_rerank_failure(exc: Exception) -> None:
-    """rerank 失败只提示一次（避免刷屏），检索本身继续用 RRF 顺序的结果。
-
-    之所以不把 rerank 失败直接抛出去：rerank 是「锦上添花」的精排环节，
-    云端不可用时让它拖垮整个问答体验不划算；但也不能完全静默，
-    否则用户会以为「检索质量就是这样」，排查不到真正的原因。
-    """
+    """rerank 降级只提示一次（避免刷屏），检索继续用 RRF 顺序的结果。"""
     global _RERANK_WARNED
     if _RERANK_WARNED:
         return
     _RERANK_WARNED = True
     from .embeddings import humanize_error
 
-    print(f"⚠️ rerank 调用失败，后续将退回 RRF 排序：{humanize_error(exc)}", file=sys.stderr)
+    print(f"⚠️ rerank 调用失败，本次及后续将退回 RRF 排序：{humanize_error(exc)}", file=sys.stderr)

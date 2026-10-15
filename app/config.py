@@ -14,7 +14,6 @@ except ImportError:
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.getenv("DATA_DIR", str(BASE_DIR / "data")))
 DOCS_DIR = DATA_DIR / "docs"
-CHROMA_DIR = DATA_DIR / "chroma"
 DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
@@ -34,7 +33,8 @@ TZ_NAME = os.getenv("TZ_NAME", "Asia/Shanghai")
 # Redis 连接串（可空）。本项目两处用到 Redis：
 # 1. LangGraph checkpointer：会话记忆 / 断点续跑 / 多副本一致性；
 # 2. 人工确认的挂起登记表（SSE 连接与确认回执可能落在不同副本）。
-# 留空 = 本地内存模式（重启丢会话）；配了但连不上会在启动时提示并自动退回内存。
+# 留空 = 本地内存模式（重启丢会话）；配置后必须可用（checkpointer 需 RedisJSON），
+# 启动时会校验，校验失败直接报错，不降级。
 REDIS_URL = os.getenv("REDIS_URL", "")
 
 # JWT 签名密钥（可空：留空会在 data/.jwt_secret 自动生成并持久化，重启不失效）

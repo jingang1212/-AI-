@@ -33,6 +33,7 @@ def main():
         print("向量库已清空，开始全量导入")
 
     imported = []
+    failed = []
     for p in sorted(config.DOCS_DIR.iterdir()):
         if p.suffix.lower() in {".md", ".txt", ".pdf", ".docx"}:
             try:
@@ -40,10 +41,14 @@ def main():
                 imported.append((p.name, r["chunk_count"]))
             except Exception as e:
                 # EmbeddingError 里已经把「账户欠费/额度用尽」这类问题翻译成人话了
-                print(f"跳过 {p.name}: {e}")
+                failed.append((p.name, str(e)))
     for name, n in imported:
         print(f"已索引 {name}: {n} 块")
-    print(f"共 {len(imported)} 篇")
+    for name, err in failed:
+        print(f"导入失败 {name}: {err}")
+    print(f"成功 {len(imported)} 篇，失败 {len(failed)} 篇")
+    if failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

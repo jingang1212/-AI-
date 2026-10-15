@@ -93,8 +93,8 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
     except Exception:
         if not staff_tools:
             raise
-        # 兜底：部分模型/网关不一定支持 tool_choice="required"，
-        # 报错就退回默认行为（auto），宁可少一次强制派活，也不能让整个请求 500。
+        # 网关不支持 tool_choice="required" 时退回 auto 重试一次；
+        # auto 再失败会把原始错误抛给上层，不会被吞掉。
         ai = await _astream_merged(llm.bind_tools(staff_tools), messages)
 
     calls = getattr(ai, "tool_calls", None) or []

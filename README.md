@@ -10,7 +10,8 @@
 ## 技术栈
 
 Python 3.11 · FastAPI · LangChain · LangGraph · 百炼（DashScope）·
-RAG（向量 + BM25 + RRF + rerank）· SQLite/MySQL · SSE + WebSocket
+RAG（向量 + BM25 + RRF + rerank）· SQLite/MySQL · SSE + WebSocket ·
+前端 React + TypeScript + Ant Design（Vite）
 
 ## 目录结构
 
@@ -19,14 +20,14 @@ app/
   config.py          # .env 配置（模型名、地址、分块参数、时区）
   llm.py             # 对话模型工厂（OpenAI 兼容模式 + 关闭思考模式）
   embeddings.py      # 向量化（qwen3.7-text-embedding，1024 维）
-  vectorstore.py     # 向量库：Milvus（默认嵌入式 Lite，服务端同套代码）+ numpy 应急兜底
+  vectorstore.py     # 向量库：Milvus（默认嵌入式 Lite，服务端同套代码，失败不降级）
   hybrid.py          # 中文分词 + BM25L + RRF 融合
   rerank.py          # qwen3.7-text-rerank 精排
   rag.py             # 解析 → 分块 → 入库 → 混合检索
   database.py        # 业务数据层（演示用 SQLite，接口对齐 MySQL）
   timeutil.py        # 统一时区口径（踩过坑，务必用它取时间）
   console.py         # Windows 控制台 UTF-8 修复
-  tools/             # 5 个 LangChain 工具 + 角色权限白名单
+  tools/             # 7 个 LangChain 工具 + 角色权限白名单
   agents/            # LangGraph 多智能体：主管 + 知识/运维/报告三个员工
 scripts/
   check_api.py       # 接口自检（不需要装依赖就能跑）
@@ -40,6 +41,11 @@ evaluation/
 data/
   docs/              # 知识库语料（法规/标准/手册/SOP/案例库）
   skills/            # 技能手册（按需加载，不占系统提示词）
+frontend/
+  index.html         # Vite 入口
+  package.json       # 前端依赖与脚本（dev / build）
+  src/               # React 源码（App / MessageBubble / ConfirmModal 等）
+  dist/              # 构建产物（后端托管的就是它）
 ```
 
 ## 快速开始
@@ -66,7 +72,13 @@ python evaluation/evaluate.py
 python scripts/agent_chat.py "CEMS-003 这台设备离线了，帮我看看什么原因" --role ops
 python scripts/agent_chat.py "分析 3 号排口最近 24 小时二氧化硫并出报告" --role leader
 
-# 7. 启动 HTTP/WS 服务（D4）
+# 7. 构建前端（首次或改过 frontend/ 后执行一次）
+cd frontend
+npm install
+npm run build
+cd ..
+
+# 8. 启动 HTTP/WS 服务
 uvicorn app.api.main:app --port 8000
 python scripts/test_stream.py        # 另开终端：SSE + WebSocket 端到端测试
 python scripts/test_milvus.py        # Milvus 机制测试（离线）：schema/过滤/删除/持久化
@@ -87,26 +99,30 @@ python scripts/test_milvus.py        # Milvus 机制测试（离线）：schema/
 | 账号 | 角色 | 数据范围 |
 |---|---|---|
 | `leader_01` | 环保局领导（只读） | 全部 3 家企业 |
-| `ops_01` | 安装运维（可写，写前人工确认） | 华能热电 1 家（30 台设备里可见 12 台） |
+| `ops_01` | 安装运维（可写，写前人工确认） | 全部 3 家企业（安装与运维同一批人，服务全部客户） |
 | `service_01` | 客服 | 仅知识库，无企业数据 |
 
 租户隔离三层强制：接口层按 user_company 过滤、Agent 工具层对站点/设备做
 范围校验（模型乱传编号会被拦）、写工具额外校验角色与设备归属。
-验证：`python scripts/test_stream.py`（含「ops 越权访问站点 → 403」断言）。
+验证：`python scripts/test_stream.py`（含「客服无企业范围访问站点 → 403」断言）。
 
 ## 前端聊天页
 
-服务启动后直接打开 http://127.0.0.1:8000/ 即可（单文件页面，零构建）：
+前端是独立的 React 单页应用（Vite + React + TypeScript + Ant Design），
+构建产物由后端托管在 http://127.0.0.1:8000/ ：
 
-- 顶栏切换**身份**（领导/运维/客服）与**传输协议**（SSE / WebSocket）；
-- 流式打字机输出 + Markdown 渲染（表格/代码/列表）+ 工具调用过程折叠展示；
-- 知识库引用来源 chips、趋势图 `<img>` 渲染、报告下载链接；
+- 登录页（演示账号见上文），登录后顶栏显示身份与角色；
+- 顶栏切换**传输协议**（SSE / WebSocket），支持「新会话」「退出」；
+- 流式打字机输出 + Markdown 渲染（react-markdown + GFM：表格/代码/列表）；
+- 工具调用过程折叠展示（主管调度 → 员工 → 工具 → 返回）；
+- 知识库引用来源 Tag、趋势图 `<img>` 渲染、报告下载链接；
 - 写操作时弹**人工确认框**，批准/拒绝回执走 `POST /api/chat/confirm`；
 - 按 `Esc` 停止当前回答（SSE 用 AbortController，WebSocket 发 abandon）。
 
-页面实现见 [frontend/index.html](frontend/index.html)（内嵌全部样式与 JS，
-含一个手写的迷你 Markdown 渲染器，避免引第三方库）。
-实测截图：[docs/screenshots/chat-page.png](docs/screenshots/chat-page.png)。
+开发模式：`cd frontend && npm run dev`（默认 5173 端口，已配置代理到 8000 后端）。
+生产/演示：`cd frontend && npm install && npm run build` 后由后端直接托管。
+未构建时后端会以「纯 API 模式」启动并提示，构建后重启即可托管页面。
+源码目录见 `frontend/`（`src/` 下的 App / MessageBubble / ConfirmModal 组件）。
 
 ## 写操作与人工确认（D5）
 
@@ -121,7 +137,7 @@ python scripts/test_milvus.py        # Milvus 机制测试（离线）：schema/
 机制验证：`python scripts/test_confirm_unit.py`（不需要网络，
 覆盖批准/拒绝/白名单三条路径）。
 
-## 两个角色能看到什么
+## 三个角色能看到什么
 
 | 角色 | 可用工具 | 典型问题 |
 |---|---|---|
@@ -141,12 +157,12 @@ python scripts/test_milvus.py        # Milvus 机制测试（离线）：schema/
 
 ## Redis 的应用位置（两个场景）
 
-`REDIS_URL`（.env）为空 = 全内存模式；配置后自动启用：
+`REDIS_URL`（.env）为空 = 全内存模式（重启丢会话）；配置后启用：
 
 1. **LangGraph checkpointer（会话记忆 / 断点续跑 / 多副本一致）**
    需要 Redis Stack（RedisJSON 模块）：
    `docker run -d -p 6380:6379 redis/redis-stack-server`。
-   启动时会探测 `JSON.SET`，不支持则降级内存并提示，不会启动失败。
+   启动时会校验连通性与 `JSON.SET`，校验失败直接启动报错并说明原因，不做降级。
 2. **人工确认挂起登记表**
    多副本部署时 SSE 长连接与确认回执可能落在不同副本，必须用 Redis 共享。
    普通 Redis（含 Memurai）即可，纯命令实现。

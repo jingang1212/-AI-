@@ -8,7 +8,6 @@ dependencies = [
     "langchain-text-splitters>=0.3",
     "langchain-core>=0.3",
     "langgraph>=0.2",
-    "numpy>=1.26",
     "pymilvus>=2.5",
     "milvus-lite>=3.2",
     "matplotlib>=3.8",

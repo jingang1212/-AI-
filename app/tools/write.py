@@ -63,9 +63,12 @@ async def update_device_config(device_id: str, param: str, new_value: str) -> st
     # 核心：LangGraph interrupt。第一次调用会抛出 GraphInterrupt 把整个图挂起，
     # 恢复执行后返回「用户在前端的决定」。在 CLI/无确认通道场景下会被自动拒绝。
     trace_event("confirm.proposal", proposal=proposal)
+    # 注意：payload 里不要用 "type" 字段——graph.arun 会用 trace_event("interrupt", **payload)
+    # 转发给前端，若 payload 自带 type 会覆盖外层事件类型，导致前端收不到 interrupt 事件。
+    # 这里用 "kind" 描述中断子类型（当前只有 confirm 一种）。
     decision: Any = interrupt(
         {
-            "type": "confirm",
+            "kind": "confirm",
             "title": "AI 助手请求修改设备配置",
             "question": (
                 f"是否将设备 {device_id}（ID={db_id}）的「{proposal['param_label']}」"

@@ -28,6 +28,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool
+from langgraph.errors import GraphInterrupt
 from pydantic import BaseModel, Field
 
 from .. import tools as tool_registry
@@ -38,7 +39,6 @@ from .trace import trace_event
 # 4 轮足够覆盖「检索 → 查库 → 再检索」这类真实链路；
 # 超过就强制收敛，避免模型陷入重复调用同一个工具的死循环。
 MAX_STEPS = 4
-
 
 class StaffTaskArgs(BaseModel):
     """主管派给员工的任务参数。
@@ -154,10 +154,11 @@ async def run_staff(staff_name: str, task: str, role: str) -> str:
             bound = base_llm.bind_tools(staff_tools, tool_choice="required")
             try:
                 ai = await bound.ainvoke(messages)
-            except Exception:  # noqa: BLE001 —— 网关不支持 required 时退回 auto
+            except Exception:  # noqa: BLE001 —— 网关不支持 required 时退回 auto 重试一次
                 ai = await base_llm.bind_tools(staff_tools).ainvoke(messages)
         else:
-            ai = await base_llm.bind_tools(staff_tools).ainvoke(messages)
+            bound = base_llm.bind_tools(staff_tools)
+            ai = await bound.ainvoke(messages)
         messages.append(ai)
         calls = getattr(ai, "tool_calls", None) or []
 
@@ -176,6 +177,9 @@ async def run_staff(staff_name: str, task: str, role: str) -> str:
                     # 注意：这里必须用 ainvoke。某些工具（例如后面 D5 的人工确认类工具）
                     # 只实现了异步版本，用同步 invoke 会直接抛「No sync implementation」。
                     result = await tool_obj.ainvoke(call.get("args") or {})
+                except GraphInterrupt:
+                    # 写工具的人工确认中断必须冒泡到图引擎，否则确认链路永远走不到
+                    raise
                 except Exception as exc:  # noqa: BLE001 —— 工具异常必须被吃掉并回给模型
                     # 关键设计：单个工具失败不能让整个请求崩掉。
                     # 把错误文本当工具结果回给模型，模型往往能自己换参数重试，

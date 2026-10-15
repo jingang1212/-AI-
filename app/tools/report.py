@@ -47,7 +47,11 @@ def generate_report(title: str, content: str) -> str:
 
     # 头部写死生成时间与工具版本，方便事后追溯——报告是要给人看、给监管看的，
     # 「谁在什么时候用什么版本生成的」比正文本身更容易引起争议。
-    header = f"# {title}\n\n> 生成时间：{stamp}（UTC）\n> 生成方式：AI 助手自动生成，数据来源为在线监测数据库\n\n"
+    header = (
+        f"# {title}\n\n"
+        f"> 生成时间：{stamp}（{config.TZ_NAME}）\n"
+        "> 生成方式：AI 助手自动生成，数据来源为在线监测数据库\n\n"
+    )
     path.write_text(header + content, encoding="utf-8")
 
     # 推事件给前端：渲染「报告下载」链接。

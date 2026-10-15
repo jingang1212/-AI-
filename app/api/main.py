@@ -20,16 +20,26 @@ setup_console()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    """启动/关闭钩子。
-
-    启动时只做两件事：
-    1. 建表（幂等，已有数据不动）；
-    2. 体检提示——Key 没配、知识库为空这些「能提前发现的问题」直接打印，
-       避免用户连上之后才看到莫名其妙的 500。
-    """
+    """启动/关闭钩子：启动时做前置校验，问题在启动阶段就报明原因，不降级。"""
     database.init_db()
     if not config.DASHSCOPE_API_KEY:
-        print("⚠️ 未配置 DASHSCOPE_API_KEY：对话和知识库都不可用，请检查 .env", file=sys.stderr)
+        raise RuntimeError("缺少 DASHSCOPE_API_KEY：请把 .env 里的百炼 API Key 配置好再启动")
+    if config.REDIS_URL:
+        import redis as sync_redis
+
+        probe = sync_redis.from_url(config.REDIS_URL, socket_connect_timeout=2, protocol=2)
+        try:
+            probe.ping()
+            # checkpointer 底层依赖 RedisJSON 模块（只有 Redis Stack 自带）
+            probe.execute_command("JSON.SET", "ai-helper:probe:json", "$", '{"ping": 1}')
+            probe.delete("ai-helper:probe:json")
+        except Exception as exc:  # noqa: BLE001
+            probe.close()
+            raise RuntimeError(
+                f"Redis 校验失败（{exc}）。checkpointer 需要 RedisJSON 模块（Redis Stack）；"
+                "如不使用 Redis，请把 .env 里 REDIS_URL 留空（内存模式，重启丢会话）"
+            ) from exc
+        probe.close()
     if not vectorstore.get_all_chunks():
         print("⚠️ 知识库为空：请先执行 python scripts/ingest.py 导入文档", file=sys.stderr)
     from ..security import get_jwt_secret
@@ -82,7 +92,16 @@ REPORTS_DIR = config.DATA_DIR / "reports"
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/reports", StaticFiles(directory=str(REPORTS_DIR)), name="reports")
 
-# 前端页面：单文件聊天页（SSE/WebSocket 双协议、人工确认弹窗都在里面）。
+# 前端页面：React（Vite）构建产物。开发时用 `npm run dev`（自带代理），
+# 生产/演示先 `cd frontend && npm install && npm run build` 生成 dist。
+# 构建产物存在就托管；不存在则本次以纯 API 模式启动（不阻断后端）。
 # 注意必须最后挂载 "/"：FastAPI 按注册顺序匹配，先注册的路由优先级更高。
-FRONTEND_DIR = config.BASE_DIR / "frontend"
-app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+FRONTEND_DIR = config.BASE_DIR / "frontend" / "dist"
+if (FRONTEND_DIR / "index.html").exists():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+else:
+    print(
+        "⚠️ 未找到前端构建产物（frontend/dist），本次以纯 API 模式启动；"
+        "需要页面时执行 cd frontend && npm install && npm run build 后重启",
+        file=sys.stderr,
+    )

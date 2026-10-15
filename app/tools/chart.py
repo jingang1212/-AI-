@@ -14,6 +14,8 @@ import matplotlib
 
 matplotlib.use("Agg")  # 无界面后端：服务器没有显示器，必须用 Agg
 
+import sys  # noqa: E402
+
 import matplotlib.pyplot as plt  # noqa: E402
 from langchain_core.tools import tool  # noqa: E402
 
@@ -26,22 +28,32 @@ from ..timeutil import now  # noqa: E402
 
 CHARTS_DIR = config.DATA_DIR / "charts"
 
-# Windows 常用中文字体候选：没有中文字体时标签会变成方块（豆腐块），
-# 所以先探测字体，实在没有就退回英文标签——图不能画出来是崩的。
+# Windows 常用中文字体候选。找不到中文字体时退回英文标签（图仍正确可用），
+# 并打印一次警告——这是「结果可用的可见降级」，不阻断服务。
 _CJK_FONTS = ["Microsoft YaHei", "SimHei", "PingFang SC", "Noto Sans CJK SC"]
 
 
 def _pick_font() -> str | None:
-    try:
-        from matplotlib import font_manager
+    from matplotlib import font_manager
 
-        installed = {f.name for f in font_manager.fontManager.ttflist}
-        return next((name for name in _CJK_FONTS if name in installed), None)
-    except Exception:  # noqa: BLE001
-        return None
+    installed = {f.name for f in font_manager.fontManager.ttflist}
+    return next((name for name in _CJK_FONTS if name in installed), None)
 
 
 _FONT = _pick_font()
+_FONT_WARNED = False
+
+
+def _warn_no_cjk_font() -> None:
+    """缺中文字体时提示一次：图表用英文标签，安装字体后自动恢复中文。"""
+    global _FONT_WARNED
+    if _FONT_WARNED:
+        return
+    _FONT_WARNED = True
+    print(
+        f"⚠️ 未找到中文字体（{' / '.join(_CJK_FONTS)}），趋势图将使用英文标签；安装字体后自动恢复中文",
+        file=sys.stderr,
+    )
 
 
 @tool
@@ -77,18 +89,14 @@ def draw_trend_chart(station_id: int, metric: str = "二氧化硫", hours: int =
     use_cjk = _FONT is not None
     if use_cjk:
         plt.rcParams["font.sans-serif"] = [_FONT]
+    else:
+        _warn_no_cjk_font()
     plt.rcParams["axes.unicode_minus"] = False  # 中文环境下负号会乱码，必须关掉
 
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.plot(labels, means, color="#1f77b4", marker="o", linewidth=1.8, label="小时均值" if use_cjk else "mean")
-    ax.fill_between(
-        labels, lows, highs, color="#1f77b4", alpha=0.15,
-        label="峰谷区间" if use_cjk else "min-max",
-    )
-    ax.set_title(
-        f"站点 {station_id} · {metric} 最近 {hours} 小时趋势" if use_cjk else f"station {station_id} {metric}",
-        fontsize=13,
-    )
+    ax.fill_between(labels, lows, highs, color="#1f77b4", alpha=0.15, label="峰谷区间" if use_cjk else "min-max")
+    ax.set_title(f"站点 {station_id} · {metric} 最近 {hours} 小时趋势" if use_cjk else f"station {station_id} {metric}", fontsize=13)
     ax.set_ylabel(f"{metric}（{unit}）" if use_cjk else f"{metric} ({unit})")
     ax.grid(True, linestyle="--", alpha=0.5)
     ax.legend()

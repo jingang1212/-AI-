@@ -115,7 +115,7 @@ _store: PendingStore | None = None
 
 
 def get_store() -> PendingStore:
-    """进程内单例。按 REDIS_URL 选择实现（Redis 连不上退回内存）。"""
+    """进程内单例：按 REDIS_URL 选择实现（留空用内存，配置即用 Redis，不降级）。"""
     global _store
     if _store is None:
         if config.REDIS_URL:

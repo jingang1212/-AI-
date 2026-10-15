@@ -151,12 +151,16 @@ async def test_confirm_flow(client: httpx.AsyncClient, headers: dict) -> None:
     database.execute(
         "UPDATE device_heartbeat SET ts=? WHERE device_id=1", (now_str(),)
     )
-    # 租户隔离断言：ops_01 只授权了华能热电（company 1）
+    # 租户隔离：ops_01 是安装/运维人员（安装与运维同一批人，服务全部客户）→ 全量 30 台
     devices = await client.get("/api/devices", headers=headers)
-    print(f"[范围] ops 可见设备数 = {devices.json()['count']}（预期 12，全量 30）")
-    deny = await client.get("/api/monitor/data", params={"station_id": 2}, headers=headers)
-    allow = await client.get("/api/monitor/data", params={"station_id": 1}, headers=headers)
-    print(f"[范围] 站点 2 访问 → {deny.status_code}（预期 403）；站点 1 访问 → {allow.status_code}（预期 200）")
+    print(f"[范围] ops 可见设备数 = {devices.json()['count']}（预期 30，全量）")
+    allow = await client.get("/api/monitor/data", params={"station_id": 2}, headers=headers)
+    print(f"[范围] ops 访问站点 2 → {allow.status_code}（预期 200）")
+    # 客服账号无企业绑定，仍验证 fail-closed：访问任何站点数据都 403
+    svc = await client.post("/api/auth/login", json={"username": "service_01", "password": "123456"})
+    svc_headers = {"Authorization": f"Bearer {svc.json()['token']}"}
+    deny = await client.get("/api/monitor/data", params={"station_id": 1}, headers=svc_headers)
+    print(f"[范围] 客服访问站点 1 → {deny.status_code}（预期 403，无企业范围）")
 
     session = "confirm-test"
     interrupted = False

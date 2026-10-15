@@ -2,7 +2,6 @@
 
 - 中文用 jieba（结巴）分词：索引侧 lcut（精确模式），查询侧 cut_for_search
   （搜索引擎模式，会额外产生长词切分，提高召回）；
-- jieba 不可用时退回「单字 + 二元组」的字符级切分（保底，不推荐）；
 - BM25 用 BM25L（对长文档有长度修正）；
 - RRF 用 1/(k+rank)，k=60，规避向量分与 BM25 分数量纲不同。
 
@@ -11,46 +10,21 @@ jieba 文档：https://github.com/fxsjy/jieba
 
 from __future__ import annotations
 
-import re
-
+import jieba
 from rank_bm25 import BM25L
 
-try:
-    import jieba
-
-    jieba.setLogLevel(20)  # 关掉 jieba 每次加载词典的日志刷屏
-    _HAS_JIEBA = True
-except ImportError:  # 极少见：依赖没装上时保底走字符级切分
-    jieba = None  # type: ignore[assignment]
-    _HAS_JIEBA = False
+jieba.setLogLevel(20)  # 关掉 jieba 每次加载词典的日志刷屏
 
 RRF_K = 60
 
-# 英文/数字（含 ._-/ 连接的字段）按整词；中文按连续汉字段
-_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9]+(?:[._:/-][A-Za-z0-9]+)*|[\u3400-\u4dbf\u4e00-\u9fff]+")
-
-
 def tokenize(text: str, for_search: bool = False) -> list[str]:
-    """中文分词：优先 jieba；不可用时退回字符级切分。
+    """中文分词：直接用 jieba（缺少依赖会在导入期报错，不降级）。
 
     for_search=True 用于查询：cut_for_search 会把「设备离线排查」切成
     设备/离线/排查/设备离线/离线排查 这类组合，提高和文档词的命中率。
     """
-    if _HAS_JIEBA:
-        cut = jieba.cut_for_search(text) if for_search else jieba.lcut(text)
-        return [t.strip().lower() for t in cut if t.strip()]
-
-    # ---- 以下为保底实现（jieba 缺失时）----
-    tokens: list[str] = []
-    for m in _TOKEN_PATTERN.finditer(text):
-        value = m.group(0).lower()
-        if "\u3400" <= value[0] <= "\u9fff":
-            chars = list(value)
-            tokens.extend(chars)
-            tokens.extend("".join(chars[i : i + 2]) for i in range(len(chars) - 1))
-        else:
-            tokens.append(value)
-    return tokens
+    cut = jieba.cut_for_search(text) if for_search else jieba.lcut(text)
+    return [t.strip().lower() for t in cut if t.strip()]
 
 
 def build_index(texts: list[str]) -> BM25L | None:

@@ -25,7 +25,6 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -54,57 +53,24 @@ def _make_checkpointer():
     - 换成 Redis 后，thread_id → checkpoint 落在共享存储，任意副本都能续上
       同一个会话，重启也不丢——这就是「断点续跑 + 多副本部署」的基础设施。
 
-    Redis 不可用时**降级到内存**并打印警告，而不是启动失败：
-    本地演示没有 Redis 也能跑，但会付出「重启丢会话」的代价。
+    不做降级：REDIS_URL 一旦配置，就必须真的用 Redis；服务启动时 main.py
+    会先验证连通性与 RedisJSON 模块，验证不过直接启动失败并报明原因。
     """
     if not config.REDIS_URL:
-        return MemorySaver()
-    try:
-        import redis as sync_redis
-
-        # 先做一次连通性探测：from_conn_string 是惰性建连，
-        # 不探测的话错误会推迟到第一次问答才暴露，排查成本高很多。
-        # protocol=2：redis-py 5 默认 RESP3 握手（HELLO 3），
-        # Redis < 6 不支持会报 unknown command HELLO——兼容旧版服务器必须显式降级。
-        probe = sync_redis.from_url(config.REDIS_URL, socket_connect_timeout=2, protocol=2)
-        probe.ping()
-        # checkpointer 底层（redisvl）依赖 RedisJSON 模块（JSON.SET）。
-        # 原版 Redis 5 和 Memurai 都没有这个模块，只有 Redis Stack 镜像带。
-        # 这里探测一次，不支持就降级内存并给出可执行的提示，
-        # 而不是等第一次问答时才抛 unknown command JSON.SET。
-        try:
-            probe.execute_command("JSON.SET", "ai-helper:probe:json", "$", '{"ping": 1}')
-            probe.delete("ai-helper:probe:json")
-        except Exception:  # noqa: BLE001
-            probe.close()
-            print(
-                "⚠️ Redis 缺少 RedisJSON 模块（checkpointer 需要）：已降级内存 checkpointer，"
-                "重启后会话记忆会丢失。可用 Redis Stack："
-                "docker run -d -p 6380:6379 redis/redis-stack-server，并把 REDIS_URL 指到 6380。",
-                file=sys.stderr,
-            )
-            return MemorySaver()
-        probe.close()
-    except Exception as exc:  # noqa: BLE001
-        print(
-            f"⚠️ Redis 不可用（{exc}），退回内存 checkpointer：重启后会话记忆会丢失",
-            file=sys.stderr,
-        )
         return MemorySaver()
 
     from langgraph.checkpoint.redis import AsyncRedisSaver
 
     import redis.asyncio as aioredis
 
-    # 传入自定义客户端而不是 URL：这样能带上 protocol=2 兼容 Redis 5/6
+    # 传入自定义客户端：带上 protocol=2 兼容 Redis 5/6（redis-py 5 默认 RESP3 握手）
     client = aioredis.from_url(config.REDIS_URL, protocol=2)
     return AsyncRedisSaver(redis_client=client)
 
 
 def checkpointer_backend() -> str:
     """当前 checkpointer 用的什么后端（healthz 展示用）。"""
-    get_graph()  # 确保已初始化
-    return "redis" if (config.REDIS_URL and not isinstance(_CHECKPOINTER, MemorySaver)) else "memory"
+    return "redis" if config.REDIS_URL else "memory"
 
 
 async def staff_node(state: AgentState) -> dict[str, Any]:
@@ -129,6 +95,9 @@ async def staff_node(state: AgentState) -> dict[str, Any]:
         else:
             try:
                 content = await tool_obj.ainvoke(args)  # 必须 ainvoke，见 staff.py 注释
+            except GraphInterrupt:
+                # 写工具的人工确认中断必须冒泡到图引擎，否则确认弹窗永远不出现
+                raise
             except Exception as exc:  # noqa: BLE001
                 # 一个员工崩了不影响其他员工：把错误当成它的「汇报」交回主管，
                 # 主管可以选择换个员工重试，或者如实告诉用户当前能力受限。
@@ -251,5 +220,5 @@ async def arun(
         # 宁可给用户一句可理解的说明，也不要返回空字符串让前端显示一片空白
         # ——空响应在前端通常表现为「转圈不动」，用户会以为系统坏了。
         answer = "本次分析未能在有限的调度轮次内收敛，请把问题拆小一些再问一次（例如先问设备状态，再问数据分析）。"
-    trace_event("complete", answer=answer[:500])
+    trace_event("complete", answer=answer)
     return {"answer": answer, "events": events, "rounds": int(state.get("rounds", 0))}

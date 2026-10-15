@@ -18,8 +18,13 @@ CHROMA_DIR = DATA_DIR / "chroma"
 DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
-EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-v4")
-CHAT_MODEL = os.getenv("CHAT_MODEL", "qwen-plus")
+EMBED_MODEL = os.getenv("EMBED_MODEL", "qwen3.7-text-embedding")
+CHAT_MODEL = os.getenv("CHAT_MODEL", "qwen3.8-flash")
+RERANK_MODEL = os.getenv("RERANK_MODEL", "qwen3.7-text-rerank")
+RERANK_URL = os.getenv(
+    "RERANK_URL",
+    "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank",
+)
 BASE_URL = os.getenv("BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
 CHUNK_SIZE = 800

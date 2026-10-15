@@ -133,8 +133,16 @@ def search(query: str, top_k: int = config.DEFAULT_TOP_K) -> list[dict]:
         item = vec_map.get(key) or bm25_map.get(key)
         if item:
             hits.append({**item, "rrf": round(rrf_score, 4)})
-        if len(hits) >= top_k:
-            break
+    hits = hits[: top_k * 4]
 
-    # 4) rerank 预留：TODO 接 bge-reranker（本地）或 rerank API 精排
-    return hits
+    # 4) rerank 精排：配置了就用，失败则退回 RRF 顺序
+    if config.RERANK_MODEL and hits:
+        try:
+            from . import rerank as rerank_mod
+
+            ranked = rerank_mod.rerank(query, [h["text"] for h in hits], top_n=top_k)
+            if ranked:
+                hits = [{**hits[i], "rerank": round(score, 4)} for i, score in ranked]
+        except Exception:
+            pass
+    return hits[:top_k]

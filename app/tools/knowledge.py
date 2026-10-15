@@ -22,9 +22,10 @@ from langchain_core.tools import tool
 from .. import config, rag
 from ..agents.trace import trace_event
 
-# 单条片段回给模型的字符上限。太小会丢关键结论，太大浪费 token，
-# 400 字左右是「一段标准/一条 SOP」的常见长度。
-SNIPPET_CHARS = 400
+# 单条片段回给模型的字符上限。实测教训：分块是 800 字/块，截到 400 字时
+# 法规类文档的「罚则条款」经常落在被截掉的后半段，模型只能反复检索还拿不到
+# 可引用原文。设成 900（覆盖一整块 + 少量重叠余量）后条款完整可见。
+SNIPPET_CHARS = 900
 
 
 @tool

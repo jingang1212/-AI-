@@ -91,8 +91,13 @@ class MilvusStore:
             self.client.create_collection(
                 collection_name=config.MILVUS_COLLECTION, schema=schema, index_params=index_params
             )
+            # Milvus 服务端语义：集合要先 load 到内存才能 search/query。
+            # 新集合是 released 状态，不 load 会报 code=101。
+            self.client.load_collection(config.MILVUS_COLLECTION)
             return
 
+        # 已存在：确保加载（重复 load 幂等）。Lite 模式跳过也行，统一处理最稳。
+        self.client.load_collection(config.MILVUS_COLLECTION)
         # 已存在的 collection 做维度体检：换 embedding 模型没重建表时，
         # 错误会以「向量维度不匹配」的诡异形态出现，这里提前拦住。
         fields = self.client.describe_collection(config.MILVUS_COLLECTION).get("fields", [])
@@ -164,7 +169,9 @@ class MilvusStore:
             limit=top_k,
             filter=self._expr(where),
             search_params={"metric_type": "COSINE", "params": {"ef": 64}},
-            output_fields=["content", "source", "kb_id"],
+            # 必须显式包含主键 chunk_id：自定义主键不会被自动返回，
+            # 漏了它 entity 里没有 key，RAG 层合并时会把所有命中塌成同一个空 key
+            output_fields=["chunk_id", "content", "source", "kb_id"],
         )
         return [
             {

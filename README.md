@@ -125,3 +125,17 @@ python scripts/test_stream.py        # 另开终端：SSE + WebSocket 端到端�
 - 数据文件（`data/app.db`、`data/vectors.json`、`data/reports/`）同样不入库；
 - 换 embedding 模型必须重新全量入库，并同步修改 `EMBED_DIM`；
 - 云端账户欠费时，接口会返回 `Arrearage`，代码会给出中文提示（详见审查记录）。
+
+## Redis 的应用位置（两个场景）
+
+`REDIS_URL`（.env）为空 = 全内存模式；配置后自动启用：
+
+1. **LangGraph checkpointer（会话记忆 / 断点续跑 / 多副本一致）**
+   需要 Redis Stack（RedisJSON 模块）：
+   `docker run -d -p 6380:6379 redis/redis-stack-server`。
+   启动时会探测 `JSON.SET`，不支持则降级内存并提示，不会启动失败。
+2. **人工确认挂起登记表**
+   多副本部署时 SSE 长连接与确认回执可能落在不同副本，必须用 Redis 共享。
+   普通 Redis（含 Memurai）即可，纯命令实现。
+
+验证：`python scripts/test_redis.py`（两轮对话记忆 + 确认登记表双向投递）。

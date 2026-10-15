@@ -49,14 +49,11 @@ async def sse_chat(
 
     # 业务在后台任务里跑，gen() 只负责「从队列取事件 → 序列化 → yield」。
     # 这样模型的输出速率和网络的发送速率解耦：模型快、网络慢也不会卡住业务。
+    store = pending.get_store()
+
     async def decide(payload: dict) -> dict:
         """把确认请求挂起，等前端 POST /api/chat/confirm 来唤醒。"""
-        future = pending.register(body.session_id)
-        try:
-            decision = await asyncio.wait_for(future, timeout=CONFIRM_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            decision = {"approved": False, "reason": "确认超时，按拒绝处理"}
-        return decision
+        return await store.wait_decision(body.session_id, CONFIRM_TIMEOUT_SECONDS)
 
     task = asyncio.create_task(
         graph.arun(body.message, body.session_id, role, queue=queue, decide=decide)
@@ -84,7 +81,7 @@ async def sse_chat(
             # 客户端中途断开 → 生成器被关闭 → 走到这里：取消后台任务，避免空转烧 token
             if not task.done():
                 task.cancel()
-            pending.cleanup(body.session_id)
+            await store.cleanup(body.session_id)
 
     return StreamingResponse(
         gen(),

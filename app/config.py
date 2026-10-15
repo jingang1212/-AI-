@@ -31,6 +31,12 @@ BASE_URL = os.getenv("BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode
 # 详见 app/timeutil.py 里的说明（时区不一致会导致「查不到数据」的假故障）。
 TZ_NAME = os.getenv("TZ_NAME", "Asia/Shanghai")
 
+# Redis 连接串（可空）。本项目两处用到 Redis：
+# 1. LangGraph checkpointer：会话记忆 / 断点续跑 / 多副本一致性；
+# 2. 人工确认的挂起登记表（SSE 连接与确认回执可能落在不同副本）。
+# 留空 = 本地内存模式（重启丢会话）；配了但连不上会在启动时提示并自动退回内存。
+REDIS_URL = os.getenv("REDIS_URL", "")
+
 # 是否开启「思考模式」。默认关闭，原因（实测踩坑）：
 # qwen3.8-flash 默认开思考，此时传 tool_choice="required" 会直接 400：
 # «The tool_choice parameter does not support being set to required or object in thinking mode»。

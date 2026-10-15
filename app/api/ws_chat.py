@@ -53,15 +53,11 @@ async def ws_chat(websocket: WebSocket) -> None:
     role = resolve_role(first.get("role"))
     session_id = str(first.get("session_id") or "default")
     queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=MAX_QUEUE_SIZE)
+    store = pending.get_store()
 
     async def decide(payload: dict) -> dict:
         # WebSocket 是双向的，但确认回执统一走 REST（与 SSE 共用一条路径，少一套实现）
-        future = pending.register(session_id)
-        try:
-            decision = await asyncio.wait_for(future, timeout=CONFIRM_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            decision = {"approved": False, "reason": "确认超时，按拒绝处理"}
-        return decision
+        return await store.wait_decision(session_id, CONFIRM_TIMEOUT_SECONDS)
 
     task = asyncio.create_task(graph.arun(message, session_id, role, queue=queue, decide=decide))
 
@@ -96,7 +92,7 @@ async def ws_chat(websocket: WebSocket) -> None:
         if not task.done():
             task.cancel()
         send_task.cancel()
-        pending.cleanup(session_id)
+        await store.cleanup(session_id)
         try:
             await websocket.close()
         except RuntimeError:

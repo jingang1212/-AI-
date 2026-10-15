@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -33,7 +34,7 @@ from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
-from .. import tools as tool_registry
+from .. import config, tools as tool_registry
 from .staff import build_staff_tools
 from .state import AgentState
 from .supervisor import route_after_supervisor, supervisor_node
@@ -41,6 +42,69 @@ from .trace import start_trace, trace_event
 
 _CHECKPOINTER: MemorySaver | None = None
 _GRAPH = None
+
+
+def _make_checkpointer():
+    """构造 LangGraph checkpointer：配了 REDIS_URL 就用 Redis，否则用内存。
+
+    为什么要有外部 checkpointer？（面试必问，本项目的真实答案）
+    - MemorySaver 存在**进程内存**里：后端一重启，所有会话记忆清零，
+      用户多轮对话聊到一半就「失忆」；水平扩容到多副本时，A 副本的会话
+      在 B 副本上不存在，对话状态互相不一致；
+    - 换成 Redis 后，thread_id → checkpoint 落在共享存储，任意副本都能续上
+      同一个会话，重启也不丢——这就是「断点续跑 + 多副本部署」的基础设施。
+
+    Redis 不可用时**降级到内存**并打印警告，而不是启动失败：
+    本地演示没有 Redis 也能跑，但会付出「重启丢会话」的代价。
+    """
+    if not config.REDIS_URL:
+        return MemorySaver()
+    try:
+        import redis as sync_redis
+
+        # 先做一次连通性探测：from_conn_string 是惰性建连，
+        # 不探测的话错误会推迟到第一次问答才暴露，排查成本高很多。
+        # protocol=2：redis-py 5 默认 RESP3 握手（HELLO 3），
+        # Redis < 6 不支持会报 unknown command HELLO——兼容旧版服务器必须显式降级。
+        probe = sync_redis.from_url(config.REDIS_URL, socket_connect_timeout=2, protocol=2)
+        probe.ping()
+        # checkpointer 底层（redisvl）依赖 RedisJSON 模块（JSON.SET）。
+        # 原版 Redis 5 和 Memurai 都没有这个模块，只有 Redis Stack 镜像带。
+        # 这里探测一次，不支持就降级内存并给出可执行的提示，
+        # 而不是等第一次问答时才抛 unknown command JSON.SET。
+        try:
+            probe.execute_command("JSON.SET", "ai-helper:probe:json", "$", '{"ping": 1}')
+            probe.delete("ai-helper:probe:json")
+        except Exception:  # noqa: BLE001
+            probe.close()
+            print(
+                "⚠️ Redis 缺少 RedisJSON 模块（checkpointer 需要）：已降级内存 checkpointer，"
+                "重启后会话记忆会丢失。可用 Redis Stack："
+                "docker run -d -p 6380:6379 redis/redis-stack-server，并把 REDIS_URL 指到 6380。",
+                file=sys.stderr,
+            )
+            return MemorySaver()
+        probe.close()
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"⚠️ Redis 不可用（{exc}），退回内存 checkpointer：重启后会话记忆会丢失",
+            file=sys.stderr,
+        )
+        return MemorySaver()
+
+    from langgraph.checkpoint.redis import AsyncRedisSaver
+
+    import redis.asyncio as aioredis
+
+    # 传入自定义客户端而不是 URL：这样能带上 protocol=2 兼容 Redis 5/6
+    client = aioredis.from_url(config.REDIS_URL, protocol=2)
+    return AsyncRedisSaver(redis_client=client)
+
+
+def checkpointer_backend() -> str:
+    """当前 checkpointer 用的什么后端（healthz 展示用）。"""
+    get_graph()  # 确保已初始化
+    return "redis" if (config.REDIS_URL and not isinstance(_CHECKPOINTER, MemorySaver)) else "memory"
 
 
 async def staff_node(state: AgentState) -> dict[str, Any]:
@@ -95,10 +159,7 @@ def build_graph():
 
     global _CHECKPOINTER
     if _CHECKPOINTER is None:
-        # MemorySaver：进程内内存检查点，重启即丢失。
-        # 生产环境必须换成 RedisSaver / PostgresSaver（多副本部署、重启不丢会话），
-        # 这也是面试常问的「你的 checkpoint 存哪儿」。
-        _CHECKPOINTER = MemorySaver()
+        _CHECKPOINTER = _make_checkpointer()
     return graph.compile(checkpointer=_CHECKPOINTER)
 
 

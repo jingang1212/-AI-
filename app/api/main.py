@@ -55,11 +55,14 @@ app.include_router(ws_chat.router)
 @app.get("/healthz")
 def healthz() -> dict:
     """健康检查：返回服务与知识库状态，给负载均衡/监控探活用。"""
+    from ..agents.graph import checkpointer_backend
+
     return {
         "status": "ok",
         "app": "ai-helper",
         "knowledge_chunks": len(vectorstore.get_all_chunks()),
         "embedding_backend": "dashscope",
+        "checkpointer": checkpointer_backend(),
     }
 
 

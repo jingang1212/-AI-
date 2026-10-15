@@ -108,26 +108,39 @@ def get_graph():
     return _GRAPH
 
 
-async def arun(question: str, thread_id: str, role: str) -> dict[str, Any]:
+async def arun(
+    question: str,
+    thread_id: str,
+    role: str,
+    queue: asyncio.Queue | None = None,
+) -> dict[str, Any]:
     """跑一次完整对话，返回 {answer, events, rounds}。
 
     参数：
     - question：用户这句话；
     - thread_id：会话/线程 ID。LangGraph 用它对号入座地存取 checkpoint，
       同一个 thread_id 的多轮对话会自动带上历史（记忆就是这么实现的）；
-    - role：用户角色（ops/leader/service），决定提示词与工具白名单。
+    - role：用户角色（ops/leader/service），决定提示词与工具白名单；
+    - queue：可选。传入后事件会实时写进队列，由 SSE/WS 端点推给前端。
     """
     graph = get_graph()
-    events = start_trace()  # 开启轨迹收集，工具内部会用 trace_event 往里写
+    events = start_trace(queue)  # 开启轨迹收集，工具内部会用 trace_event 往里写
 
     # configurable.thread_id 是 LangGraph 约定的字段名；
     # 传错名字（例如写成 session_id）不会报错，但记忆会「静默失效」，
     # 表现为每次对话模型都忘记上文——这是新手最常见的坑。
     config = {"configurable": {"thread_id": thread_id}}
-    state = await graph.ainvoke(
-        {"messages": [HumanMessage(question)], "role": role, "rounds": 0, "task_calls": []},
-        config=config,
-    )
+    try:
+        state = await graph.ainvoke(
+            {"messages": [HumanMessage(question)], "role": role, "rounds": 0, "task_calls": []},
+            config=config,
+        )
+    except Exception as exc:  # noqa: BLE001 —— 统一转成 error 事件推给前端
+        message = str(exc)
+        if "MissingApiKeyError" in type(exc).__name__ or "DASHSCOPE_API_KEY" in message:
+            message = "服务端未配置大模型 API Key，请运维检查 .env"
+        trace_event("error", message=message[:500])
+        raise
 
     answer = ""
     for msg in reversed(state["messages"]):

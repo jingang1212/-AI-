@@ -65,7 +65,21 @@ python evaluation/evaluate.py
 # 6. 跑一次完整的多智能体对话
 python scripts/agent_chat.py "CEMS-003 这台设备离线了，帮我看看什么原因" --role ops
 python scripts/agent_chat.py "分析 3 号排口最近 24 小时二氧化硫并出报告" --role leader
+
+# 7. 启动 HTTP/WS 服务（D4）
+uvicorn app.api.main:app --port 8000
+python scripts/test_stream.py        # 另开终端：SSE + WebSocket 端到端测试
 ```
+
+流式接口速览：
+
+| 协议 | 入口 | 适用端 | 说明 |
+|---|---|---|---|
+| SSE | `POST /sse/chat` | Web 浏览器 | `?token=` 鉴权，事件格式见 docs/技术方案.md §6 |
+| WebSocket | `/ws/chat?token=` | 微信小程序 | 首条消息 `{"type":"chat","message":"..."}`，可发 `abandon` 打断 |
+
+鉴权：`AUTH_TOKEN`（.env，默认 `demo-token-please-change`，生产必须改）；
+角色用 `X-Role` 头（ops/leader/service），未知角色按最小权限 service 处理。
 
 ## 两个角色能看到什么
 

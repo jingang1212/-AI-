@@ -5,4 +5,5 @@ data/chroma/
 data/vectors.json
 data/reports/
 data/chroma_probe/
+data/*.log
 data/*.db

@@ -89,13 +89,13 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
 
     messages = [SystemMessage(build_system_prompt(role)), *state["messages"]]
     try:
-        ai: AIMessage = await bound.ainvoke(messages)
+        ai: AIMessage = await _astream_merged(bound, messages)
     except Exception:
         if not staff_tools:
             raise
         # 兜底：部分模型/网关不一定支持 tool_choice="required"，
         # 报错就退回默认行为（auto），宁可少一次强制派活，也不能让整个请求 500。
-        ai = await llm.bind_tools(staff_tools).ainvoke(messages)
+        ai = await _astream_merged(llm.bind_tools(staff_tools), messages)
 
     calls = getattr(ai, "tool_calls", None) or []
     for call in calls:
@@ -103,6 +103,47 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
         trace_event("dispatch", staff=call["name"], args=call.get("args"))
 
     return {"messages": [ai], "rounds": rounds + 1, "task_calls": calls}
+
+
+async def _astream_merged(bound, messages: list[Any]) -> AIMessage:
+    """用流式方式调用模型：把 token 增量推出去，同时拼回完整 AIMessage。
+
+    为什么不自己写合并？（实测踩坑，面试必讲）
+    DashScope 流式返回里，工具调用参数是**分片的 JSON 字符串**：
+        {"task": "用户      ← 第一个分片
+        （安装/运维          ← 后续分片
+        工程师）反馈：...
+    我第一版手写了「按 id 分组 + 拼字符串」的合并，结果踩了两个坑：
+    1. 有的分片 id 是空字符串，被误当成新工具调用，生成了 name 为空的幽灵调用，
+       主管连续 6 轮「派活失败 → 重试 → 道歉」；
+    2. LangChain 会把部分分片提前 json.loads 成 dict，按 key 覆盖而不是拼接，
+       任务文本被截断成两个字。
+
+    正确做法：直接复用 LangChain 为流式聚合设计的 `AIMessageChunk + AIMessageChunk`
+    加法合并（官方就是用它做 stream 聚合的），参数分片会按 index 拼接成完整 JSON。
+    探针脚本验证过：合并结果完整还原了整段 task。
+    """
+    merged = None
+    async for chunk in bound.astream(messages):
+        if isinstance(chunk.content, str) and chunk.content:
+            # 打字机推送：每收到一个 token 就发一条 content.delta
+            trace_event("content.delta", delta=chunk.content)
+        # 关键：用 chunk 加法而不是自己拼。chunk 类型是 AIMessageChunk，
+        # 它实现了 __add__，内部会按 index 合并 tool_call 分片并最终解析出完整 args。
+        merged = chunk if merged is None else merged + chunk
+
+    content = merged.content if merged is not None else ""
+    if isinstance(content, list):
+        # 多模态模型会把内容拆成 content blocks；本项目只取文本块
+        content = "".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in content)
+    tool_calls = getattr(merged, "tool_calls", None) if merged is not None else None
+    # 注意：tool_calls 为 None 时不能显式传 None——
+    # pydantic 2 校验要求该字段要么是合法列表，要么不传（用默认值）。
+    # 显式传 None 会抛「Input should be a valid list」，导致已流出的回答作废重试。
+    kwargs: dict[str, Any] = {"content": content}
+    if tool_calls:
+        kwargs["tool_calls"] = tool_calls
+    return AIMessage(**kwargs)
 
 
 def route_after_supervisor(state: AgentState) -> str:

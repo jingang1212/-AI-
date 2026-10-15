@@ -110,5 +110,31 @@ def index_document(filename: str, content: bytes, strategy: str = "fixed") -> di
 
 
 def search(query: str, top_k: int = config.DEFAULT_TOP_K) -> list[dict]:
-    """向量检索（D2 再加 BM25+RRF+rerank）。"""
-    return vectorstore.search(query, top_k=top_k)
+    """混合检索：向量 + BM25 → RRF 融合 → top_k。rerank 预留接口。"""
+    from . import hybrid
+
+    # 1) 向量召回
+    vec_hits = vectorstore.search(query, top_k=top_k * 4)
+    vec_map = {h["key"]: h for h in vec_hits}
+
+    # 2) BM25 关键词召回
+    chunks = vectorstore.get_all_chunks()
+    bm25_keys: list[str] = []
+    bm25_map: dict[str, dict] = {}
+    for idx, score in hybrid.bm25_rank(query, [c["text"] for c in chunks], limit=top_k * 4):
+        key = chunks[idx]["key"]
+        bm25_keys.append(key)
+        bm25_map[key] = {**chunks[idx], "score": 0.0}
+
+    # 3) RRF 融合
+    fused = hybrid.reciprocal_rank_fusion(list(vec_map.keys()), bm25_keys)
+    hits = []
+    for key, rrf_score in fused:
+        item = vec_map.get(key) or bm25_map.get(key)
+        if item:
+            hits.append({**item, "rrf": round(rrf_score, 4)})
+        if len(hits) >= top_k:
+            break
+
+    # 4) rerank 预留：TODO 接 bge-reranker（本地）或 rerank API 精排
+    return hits

@@ -13,6 +13,10 @@ def get_embeddings():
     """单例 embedding 模型。"""
     global _emb
     if _emb is None:
+        if not config.DASHSCOPE_API_KEY:
+            raise RuntimeError(
+                "未检测到 DASHSCOPE_API_KEY。请复制 .env.example 为 .env 并填入你的 key。"
+            )
         _emb = DashScopeEmbeddings(
             model=config.EMBED_MODEL,
             dashscope_api_key=config.DASHSCOPE_API_KEY,

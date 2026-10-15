@@ -5,9 +5,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
-
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.getenv("DATA_DIR", str(BASE_DIR / "data")))
@@ -23,8 +25,3 @@ BASE_URL = os.getenv("BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 100
 DEFAULT_TOP_K = 5
-
-if not DASHSCOPE_API_KEY:
-    raise RuntimeError(
-        "未检测到 DASHSCOPE_API_KEY。请复制 .env.example 为 .env 并填入你的 key。"
-    )

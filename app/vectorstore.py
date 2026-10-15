@@ -39,9 +39,26 @@ def search(query: str, top_k: int = config.DEFAULT_TOP_K) -> list[dict]:
     results = get_store().similarity_search_with_score(query, k=top_k)
     return [
         {
+            "key": f"{doc.metadata.get('document_id', '')}:{doc.metadata.get('chunk_index', '')}",
             "text": doc.page_content,
             "source": doc.metadata.get("source"),
             "score": round(score, 4),
         }
         for doc, score in results
+    ]
+
+
+def get_all_chunks() -> list[dict]:
+    """取出全部 chunk（供 BM25 建索引）。数据大时应换独立关键词索引。"""
+    data = get_store().get(include=["documents", "metadatas"])
+    ids = data.get("ids") or []
+    docs = data.get("documents") or []
+    metas = data.get("metadatas") or []
+    return [
+        {
+            "key": f"{(metas[i] or {}).get('document_id', '')}:{(metas[i] or {}).get('chunk_index', '')}",
+            "text": docs[i],
+            "source": (metas[i] or {}).get("source"),
+        }
+        for i in range(len(ids))
     ]
